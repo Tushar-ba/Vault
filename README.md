@@ -3,7 +3,7 @@
 
 # Pyra-Vault: A Decentralized RWA Trading Hub
 
-Pyra-Vault is a decentralized platform for trading tokenized real-world assets (RWAs) like bonds and stocks. It leverages the stability of **PYUSD** for all on-chain transactions and integrates **Blockscout's My Crypto Profile (MCP) SDK** to provide unparalleled cross-chain transparency and security for users.
+Pyra-Vault is a decentralized platform for trading tokenized real-world assets (RWAs) like bonds and stocks. It leverages the stability of **PYUSD** for all on-chain transactions and integrates **Blockscout's (MCP)** to provide unparalleled cross-chain transparency and security for users.
 
 Our mission is to create a secure, transparent, and efficient marketplace for real-world assets on the blockchain, bridging traditional finance with the power of DeFi.
 
@@ -43,7 +43,7 @@ Pyra-Vault is built on a modular, multi-layered architecture that separates conc
 
 5.  **Blockchain (Base Sepolia / Sepolia):** The contracts are deployed on Base Sepolia, a fast and low-cost Layer 2 network, providing an ideal environment for trading. The architecture is also compatible with Ethereum Sepolia.
 
-6.  **Data Layer (Blockscout MCP SDK):** This is the single source of truth for cross-chain data. It provides the raw information needed for our user dashboards, asset analytics, and the Address Intelligence Agent.
+6.  **Data Layer (Blockscout MCP):** This is the single source of truth for cross-chain data. It provides the raw information needed for our user dashboards, asset analytics, and the Address Intelligence Agent.
 
 -----
 
