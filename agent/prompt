@@ -1,0 +1,5 @@
+{
+     "message": "Analyze this Ethereum address 0x098B716B8Aaf21512996dC57EB0615e2383E2f96. On chainId 1, fetch: get_address_info (including public_tags/private_tags), get_transactions_by_address (oldest-to-newest, up to 1000 via cursor/page_size), get_tokens_by_address. If tags include 'sanction', 'OFAC', 'exploiter', 'exploit', or 'ronin', set risk=10/10 and cite the tag. Include evidence (tx hashes, amounts, dates).",
+     "chainId": 1
+}
+

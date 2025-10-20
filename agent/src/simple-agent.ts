@@ -2,7 +2,7 @@ import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { config } from './config/index.js';
 import { Logger } from './utils/logger.js';
-import { HttpMCPClient } from './http-mcp-client.js';
+import { DockerMCPClient } from './docker-mcp-client.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -15,7 +15,7 @@ export interface AnalysisResult {
 }
 
 export class SimpleBlockscoutAgent {
-  private mcpClient: HttpMCPClient | null = null;
+  private mcpClient: DockerMCPClient | null = null;
   private llm: ChatGoogleGenerativeAI;
   private logger: Logger;
   public isInitialized: boolean = false;
@@ -47,28 +47,32 @@ export class SimpleBlockscoutAgent {
       this.mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
       this.logger.info('Loaded MCP configuration from mcp-config.json');
 
-      // Initialize HTTP MCP client
-      const blockscoutConfig = this.mcpConfig.mcpServers.blockscout;
-      this.mcpClient = new HttpMCPClient(
-        blockscoutConfig.httpUrl,
-        blockscoutConfig.timeout || 30000
-      );
+      // Initialize Docker MCP client (real MCP via Docker proxy)
+      this.mcpClient = new DockerMCPClient(this.mcpConfig);
 
       await this.mcpClient.connect();
-      this.logger.info('Connected to Blockscout MCP server via HTTP');
+      this.logger.info('Connected to real Blockscout MCP server via Docker');
 
       // Load available tools
       const toolsResponse = await this.mcpClient.listTools();
       this.availableTools = toolsResponse.tools || [];
-      this.logger.info(`Loaded ${this.availableTools.length} MCP tools`);
+      this.logger.info(`Loaded ${this.availableTools.length} real MCP tools from server`);
 
       // Log available tools for debugging
       this.availableTools.forEach((tool: any) => {
-        this.logger.info(`Available tool: ${tool.name} - ${tool.description || 'No description'}`);
+        this.logger.info(`Real MCP tool: ${tool.name} - ${tool.description || 'No description'}`);
       });
 
+      // Unlock session once to enable all tools
+      try {
+        await this.mcpClient.callTool('__unlock_blockchain_analysis__', {});
+        this.logger.info('Unlocked blockchain analysis tools');
+      } catch (e) {
+        this.logger.warn('Unlock tool call failed (may already be unlocked):', e);
+      }
+
       this.isInitialized = true;
-      this.logger.info('Simple Blockscout Agent initialized successfully');
+      this.logger.info('Simple Blockscout Agent with real MCP initialized successfully');
     } catch (error) {
       this.logger.error('Failed to initialize Simple Blockscout Agent:', error);
       // Continue with mock mode for development
@@ -108,9 +112,10 @@ export class SimpleBlockscoutAgent {
       let transactionData = null;
       if (this.mcpClient) {
         try {
-          transactionData = await this.callMcpTool('get_transaction', { txHash, chainId });
+          const chain = String(chainId ?? '1');
+          transactionData = await this.callMcpTool('get_transaction_info', { transaction_hash: txHash, chain_id: chain });
         } catch (error) {
-          this.logger.warn('Failed to get transaction data from MCP, using AI analysis only');
+          this.logger.warn('Failed to get transaction data from MCP');
         }
       }
 
@@ -169,9 +174,10 @@ Provide a comprehensive analysis based on the available data.
       let walletData = null;
       if (this.mcpClient) {
         try {
-          walletData = await this.callMcpTool('get_address_info', { address, chainId });
+          const chain = String(chainId ?? '1');
+          walletData = await this.callMcpTool('get_address_info', { address, chain_id: chain });
         } catch (error) {
-          this.logger.warn('Failed to get wallet data from MCP, using AI analysis only');
+          this.logger.warn('Failed to get wallet data from MCP');
         }
       }
 
@@ -230,10 +236,10 @@ Provide a comprehensive analysis based on the available data.
       let contractData = null;
       if (this.mcpClient) {
         try {
-          const result = await this.mcpClient.callTool('get_contract_abi', { address, chainId });
-          contractData = result.content;
+          const chain = String(chainId ?? '1');
+          contractData = await this.callMcpTool('get_contract_abi', { address, chain_id: chain });
         } catch (error) {
-          this.logger.warn('Failed to get contract data from MCP, using AI analysis only');
+          this.logger.warn('Failed to get contract data from MCP');
         }
       }
 
@@ -288,6 +294,82 @@ Provide a comprehensive analysis based on the available data.
     try {
       this.logger.info('Executing custom prompt');
       
+      // Check if the prompt is asking to analyze an address (risk, info, txs, tokens)
+      if (prompt.toLowerCase().includes('analyze') && prompt.match(/0x[a-fA-F0-9]{40}/)) {
+        const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
+        if (addressMatch) {
+          const address = addressMatch[0];
+          const chainIdMatch = prompt.match(/chain_id\s*\"(\d+)\"/i);
+          const chainIdStr = chainIdMatch ? chainIdMatch[1] : '1';
+          this.logger.info(`Detected address analysis request for: ${address} on chain ${chainIdStr}`);
+
+          let addressInfo: any = null;
+          let addressTags: any = null;
+          let tokens: any = null;
+          let txs: any = null;
+          try {
+            addressInfo = await this.callMcpTool('get_address_info', { address, chain_id: chainIdStr });
+          } catch (e) {
+            this.logger.warn('get_address_info failed', e);
+          }
+          try {
+            addressTags = await this.callMcpTool('get_address_tags', { address, chain_id: chainIdStr });
+          } catch (e) {
+            this.logger.warn('get_address_tags failed', e);
+          }
+          try {
+            tokens = await this.callMcpTool('get_tokens_by_address', { address, chain_id: chainIdStr, page_size: 200 });
+          } catch (e) {
+            this.logger.warn('get_tokens_by_address failed', e);
+          }
+          try {
+            txs = await this.callMcpTool('get_transactions_by_address', { address, chain_id: chainIdStr, page_size: 200, order: 'asc' });
+          } catch (e) {
+            this.logger.warn('get_transactions_by_address failed', e);
+          }
+
+          // Simple risk scoring
+          let riskScore = 0;
+          const reasons: string[] = [];
+          const aiTags = [
+            ...(addressInfo?.public_tags || []),
+            ...(addressInfo?.private_tags || []),
+            ...(addressTags?.public_tags || []),
+            ...(addressTags?.private_tags || [])
+          ].map((t: any) => (typeof t === 'string' ? t : (t?.name || ''))).join(' ').toLowerCase();
+
+          if (addressInfo?.is_scam) { riskScore += 5; reasons.push('Flagged as scam by explorer'); }
+          if (addressInfo?.reputation && addressInfo.reputation !== 'ok') { riskScore += 3; reasons.push(`Reputation: ${addressInfo.reputation}`); }
+          if (/sanction|ofac|exploiter|exploit|hack|ronin|bridge.*exploit/i.test(aiTags)) { riskScore = 10; reasons.push('Sanctioned / Exploiter tags detected'); }
+
+          // Balance threshold
+          const balanceWei = BigInt(addressInfo?.coin_balance ?? '0');
+          const oneHundredEthWei = BigInt('100000000000000000000');
+          if (balanceWei > oneHundredEthWei) { riskScore += 1; reasons.push('High native balance'); }
+
+          // Activity threshold
+          const txCount = (txs?.items?.length) ?? 0;
+          if (txCount > 500) { riskScore += 1; reasons.push('High transaction activity'); }
+
+          if (riskScore > 10) riskScore = 10;
+
+          const analysisPrompt = `
+Address risk assessment request\n\nAddress: ${address}\nChainId: ${chainIdStr}\n\nAddress Info: ${JSON.stringify(addressInfo || {}, null, 2)}\n\nAddress Tags: ${JSON.stringify(addressTags || {}, null, 2)}\n\nToken Holdings (truncated): ${JSON.stringify(tokens || {}, null, 2)}\n\nTransactions (first page asc, truncated): ${JSON.stringify(txs || {}, null, 2)}\n\nBased on the data above, compute a risk score from 0 (safe) to 10 (dangerous).\nExplain the rationale with concrete evidence (tags, balances, counterparties, tx hashes, dates).\nHighlight any sanctions/exploiter indications and known hack involvement.\nProvide clear recommendations (avoid, monitor, freeze, report, etc.).\nCurrent heuristic pre-score: ${riskScore} with reasons: ${reasons.join('; ') || 'none'}.\nAdjust if the detailed evidence supports a higher score.`;
+
+          const messages = [
+            new SystemMessage('You are a blockchain risk analyst. Be precise and cite concrete evidence.'),
+            new HumanMessage(analysisPrompt)
+          ];
+
+          const result = await this.llm.invoke(messages);
+          return {
+            success: true,
+            data: result.content,
+            timestamp: new Date(),
+          };
+        }
+      }
+
       // Check if the prompt is asking for address balance or info
       if (prompt.toLowerCase().includes('balance') || prompt.toLowerCase().includes('address')) {
         // Extract address from prompt
@@ -301,51 +383,13 @@ Provide a comprehensive analysis based on the available data.
           if (this.mcpClient) {
             try {
               this.logger.info('Using MCP tools to get address info...');
-              mcpData = await this.callMcpTool('get_address_info', { 
-                address: address,
-                chain_id: 11155111 // Sepolia by default
-              });
+              const chainIdMatch = prompt.match(/chain_id\s*\"(\d+)\"/i);
+              const chainIdStr = chainIdMatch ? chainIdMatch[1] : '1';
+              mcpData = await this.callMcpTool('get_address_info', { address, chain_id: chainIdStr });
               this.logger.info('Got address data from MCP server');
             } catch (mcpError) {
-              this.logger.warn('MCP tool failed, falling back to direct API:', mcpError);
+              this.logger.warn('MCP tool failed:', mcpError);
             }
-          }
-
-          // Fallback to direct API calls if MCP fails
-          if (!mcpData) {
-            this.logger.info('Using direct Blockscout API calls...');
-            const chains = [
-              { id: 1, name: 'Ethereum Mainnet', url: 'https://eth.blockscout.com' },
-              { id: 11155111, name: 'Sepolia Testnet', url: 'https://eth-sepolia.blockscout.com' },
-              { id: 10, name: 'Optimism', url: 'https://optimism.blockscout.com' },
-              { id: 42161, name: 'Arbitrum One', url: 'https://arbitrum.blockscout.com' },
-              { id: 137, name: 'Polygon', url: 'https://polygon.blockscout.com' },
-              { id: 56, name: 'BSC', url: 'https://bsc.blockscout.com' }
-            ];
-
-            let allChainData: { [key: string]: any } = {};
-            let foundOnChains: string[] = [];
-
-            // Check address on all chains
-            for (const chain of chains) {
-              try {
-                this.logger.info(`Checking address on ${chain.name}...`);
-                const response = await fetch(`${chain.url}/api/v2/addresses/${address}`);
-                if (response.ok) {
-                  const data = await response.json();
-                  allChainData[chain.name] = data;
-                  foundOnChains.push(chain.name);
-                  this.logger.info(`Found address on ${chain.name}`);
-                }
-              } catch (apiError) {
-                this.logger.warn(`Failed to get data from ${chain.name}:`, apiError);
-              }
-            }
-
-            mcpData = {
-              multiChainData: allChainData,
-              foundOnChains: foundOnChains
-            };
           }
 
           const analysisPrompt = `
@@ -391,36 +435,20 @@ Use the data provided above. If no data is available, explain why and suggest al
           if (this.mcpClient) {
             try {
               this.logger.info('Using MCP transaction_summary tool...');
-              mcpData = await this.callMcpTool('transaction_summary', { 
-                hash: txHash,
-                chain_id: 11155111 // Sepolia by default
-              });
+              const chainIdMatch = prompt.match(/chain_id\s*\"(\d+)\"/i);
+              const chainIdStr = chainIdMatch ? chainIdMatch[1] : '1';
+              mcpData = await this.callMcpTool('transaction_summary', { transaction_hash: txHash, chain_id: chainIdStr });
               this.logger.info('Got transaction summary from MCP server');
             } catch (mcpError) {
               this.logger.warn('MCP transaction_summary tool failed, trying get_transaction_info:', mcpError);
               try {
-                mcpData = await this.callMcpTool('get_transaction_info', { 
-                  hash: txHash,
-                  chain_id: 11155111
-                });
+                const chainIdMatch2 = prompt.match(/chain_id\s*\"(\d+)\"/i);
+                const chainIdStr2 = chainIdMatch2 ? chainIdMatch2[1] : '1';
+                mcpData = await this.callMcpTool('get_transaction_info', { transaction_hash: txHash, chain_id: chainIdStr2 });
                 this.logger.info('Got transaction info from MCP server');
               } catch (mcpError2) {
-                this.logger.warn('MCP get_transaction_info also failed, falling back to direct API:', mcpError2);
+                this.logger.warn('MCP get_transaction_info also failed:', mcpError2);
               }
-            }
-          }
-
-          // Fallback to direct API calls if MCP fails
-          if (!mcpData) {
-            this.logger.info('Using direct Blockscout API calls...');
-            try {
-              const response = await fetch(`https://eth-sepolia.blockscout.com/api/v2/transactions/${txHash}`);
-              if (response.ok) {
-                mcpData = await response.json();
-                this.logger.info('Got transaction data from direct API');
-              }
-            } catch (apiError) {
-              this.logger.warn('Failed to get transaction data:', apiError);
             }
           }
 
@@ -468,27 +496,12 @@ Format this as a clear, human-readable summary that anyone can understand.
           if (this.mcpClient) {
             try {
               this.logger.info('Using MCP tools to get transaction info...');
-              mcpData = await this.callMcpTool('get_transaction_info', { 
-                hash: txHash,
-                chain_id: 11155111 // Sepolia by default
-              });
+              const chainIdMatch = prompt.match(/chain_id\s*\"(\d+)\"/i);
+              const chainIdStr = chainIdMatch ? chainIdMatch[1] : '1';
+              mcpData = await this.callMcpTool('get_transaction_info', { transaction_hash: txHash, chain_id: chainIdStr });
               this.logger.info('Got transaction data from MCP server');
             } catch (mcpError) {
-              this.logger.warn('MCP tool failed, falling back to direct API:', mcpError);
-            }
-          }
-
-          // Fallback to direct API calls if MCP fails
-          if (!mcpData) {
-            this.logger.info('Using direct Blockscout API calls...');
-            try {
-              const response = await fetch(`https://eth-sepolia.blockscout.com/api/v2/transactions/${txHash}`);
-              if (response.ok) {
-                mcpData = await response.json();
-                this.logger.info('Got transaction data from direct API');
-              }
-            } catch (apiError) {
-              this.logger.warn('Failed to get transaction data:', apiError);
+              this.logger.warn('MCP tool failed:', mcpError);
             }
           }
 
@@ -536,27 +549,12 @@ Use the data provided above. If no data is available, explain why and suggest al
           if (this.mcpClient) {
             try {
               this.logger.info('Using MCP tools to get transaction history...');
-              mcpData = await this.callMcpTool('get_transactions_by_address', { 
-                address: address,
-                chain_id: 11155111 // Sepolia by default
-              });
+              const chainIdMatch = prompt.match(/chain_id\s*\"(\d+)\"/i);
+              const chainIdStr = chainIdMatch ? chainIdMatch[1] : '1';
+              mcpData = await this.callMcpTool('get_transactions_by_address', { address, chain_id: chainIdStr });
               this.logger.info('Got transaction history from MCP server');
             } catch (mcpError) {
-              this.logger.warn('MCP tool failed, falling back to direct API:', mcpError);
-            }
-          }
-
-          // Fallback to direct API calls if MCP fails
-          if (!mcpData) {
-            this.logger.info('Using direct Blockscout API calls...');
-            try {
-              const response = await fetch(`https://eth-sepolia.blockscout.com/api/v2/addresses/${address}/transactions`);
-              if (response.ok) {
-                mcpData = await response.json();
-                this.logger.info('Got transaction history from direct API');
-              }
-            } catch (apiError) {
-              this.logger.warn('Failed to get transaction history:', apiError);
+              this.logger.warn('MCP tool failed:', mcpError);
             }
           }
 

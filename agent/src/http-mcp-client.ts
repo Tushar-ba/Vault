@@ -7,6 +7,14 @@ export class HttpMCPClient {
   private logger: Logger;
   private isConnected: boolean = false;
   private availableTools: any[] = [];
+  private chainIdToBaseUrl: { [key: number]: string } = {
+    1: 'https://eth.blockscout.com',
+    11155111: 'https://eth-sepolia.blockscout.com',
+    10: 'https://optimism.blockscout.com',
+    42161: 'https://arbitrum.blockscout.com',
+    137: 'https://polygon.blockscout.com',
+    56: 'https://bsc.blockscout.com'
+  };
 
   constructor(baseUrl: string, timeout: number = 30000) {
     this.baseUrl = baseUrl;
@@ -21,6 +29,7 @@ export class HttpMCPClient {
       // Use the known tools from the Blockscout MCP server documentation
       this.availableTools = [
         { name: 'get_address_info', description: 'Get address information including balance' },
+        { name: 'get_address_tags', description: 'Get address tags including sanctions and exploiter flags' },
         { name: 'get_transaction_info', description: 'Get transaction details' },
         { name: 'get_transactions_by_address', description: 'Get address transaction history' },
         { name: 'get_tokens_by_address', description: 'Get token holdings for address' },
@@ -46,34 +55,51 @@ export class HttpMCPClient {
     this.logger.info(`Calling MCP tool: ${toolName} with args:`, args);
 
     try {
+      // Resolve base URL by chain id if provided
+      const chainId: number | undefined = args?.chain_id;
+      const base = chainId && this.chainIdToBaseUrl[chainId]
+        ? this.chainIdToBaseUrl[chainId]
+        : this.chainIdToBaseUrl[11155111]; // default Sepolia
+
       // Map MCP tools to actual Blockscout API calls
       let apiUrl = '';
-      let apiParams: any = {};
 
       switch (toolName) {
-        case 'get_address_info':
-          // Use Blockscout API directly for address info
-          apiUrl = `https://eth-sepolia.blockscout.com/api/v2/addresses/${args.address}`;
+        case 'get_address_info': {
+          // Try to get full address info including tags
+          apiUrl = `${base}/api/v2/addresses/${args.address}`;
           break;
-        case 'get_transaction_info':
-          apiUrl = `https://eth-sepolia.blockscout.com/api/v2/transactions/${args.hash}`;
+        }
+        case 'get_address_tags': {
+          // Try to get address tags specifically
+          apiUrl = `${base}/api/v2/addresses/${args.address}/tags`;
           break;
-        case 'get_transactions_by_address':
-          apiUrl = `https://eth-sepolia.blockscout.com/api/v2/addresses/${args.address}/transactions`;
+        }
+        case 'get_transaction_info': {
+          apiUrl = `${base}/api/v2/transactions/${args.hash}`;
           break;
-        case 'get_latest_block':
-          apiUrl = 'https://eth-sepolia.blockscout.com/api/v2/blocks';
+        }
+        case 'get_transactions_by_address': {
+          const pageSize = args?.page_size ?? 100;
+          const cursor = args?.cursor ? `&cursor=${encodeURIComponent(args.cursor)}` : '';
+          apiUrl = `${base}/api/v2/addresses/${args.address}/transactions?order=asc&page_size=${pageSize}${cursor}`;
           break;
-        case 'get_chains_list':
-          // Return supported chains
+        }
+        case 'get_tokens_by_address': {
+          const pageSize = args?.page_size ?? 100;
+          const cursor = args?.cursor ? `&cursor=${encodeURIComponent(args.cursor)}` : '';
+          apiUrl = `${base}/api/v2/addresses/${args.address}/tokens?order=desc&page_size=${pageSize}${cursor}`;
+          break;
+        }
+        case 'get_latest_block': {
+          apiUrl = `${base}/api/v2/blocks`;
+          break;
+        }
+        case 'get_chains_list': {
           return {
-            content: [
-              { id: 1, name: 'Ethereum Mainnet', rpc: 'https://eth.blockscout.com' },
-              { id: 11155111, name: 'Sepolia Testnet', rpc: 'https://eth-sepolia.blockscout.com' },
-              { id: 10, name: 'Optimism', rpc: 'https://optimism.blockscout.com' },
-              { id: 42161, name: 'Arbitrum One', rpc: 'https://arbitrum.blockscout.com' }
-            ]
+            content: Object.entries(this.chainIdToBaseUrl).map(([id, url]) => ({ id: Number(id), url }))
           };
+        }
         default:
           throw new Error(`Tool ${toolName} not implemented`);
       }

@@ -1,8 +1,16 @@
 {
   "mcpServers": {
     "blockscout": {
-      "httpUrl": "https://mcp.blockscout.com/mcp",
-      "timeout": 30000
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "sparfenyuk/mcp-proxy:latest",
+        "--transport",
+        "streamablehttp",
+        "https://mcp.blockscout.com/mcp"
+      ]
     }
   }
 }
