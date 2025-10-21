@@ -23,7 +23,11 @@ export class ChatbotServer {
 
   private setupMiddleware(): void {
     this.app.use(helmet());
-    this.app.use(cors());
+    this.app.use(cors({
+      origin: '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization']
+    }));
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   }
