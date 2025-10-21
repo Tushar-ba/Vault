@@ -11,6 +11,7 @@
     "chatbot": "tsc && node dist/chatbot-server.js",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:features": "node test-features.js",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },
