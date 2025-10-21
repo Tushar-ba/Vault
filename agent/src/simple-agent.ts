@@ -63,13 +63,8 @@ export class SimpleBlockscoutAgent {
         this.logger.info(`Real MCP tool: ${tool.name} - ${tool.description || 'No description'}`);
       });
 
-      // Unlock session once to enable all tools
-      try {
-        await this.mcpClient.callTool('__unlock_blockchain_analysis__', {});
-        this.logger.info('Unlocked blockchain analysis tools');
-      } catch (e) {
-        this.logger.warn('Unlock tool call failed (may already be unlocked):', e);
-      }
+      // Unlock session for multiple chains to enable all tools
+      await this.unlockMultipleChains();
 
       this.isInitialized = true;
       this.logger.info('Simple Blockscout Agent with real MCP initialized successfully');
@@ -98,6 +93,35 @@ export class SimpleBlockscoutAgent {
 
     this.logger.info(`MCP tool ${toolName} result:`, result);
     return result.content;
+  }
+
+  private async unlockMultipleChains(): Promise<void> {
+    // Priority chains to unlock (most commonly used)
+    const priorityChains = [
+      { id: '1', name: 'Ethereum Mainnet' },
+      { id: '11155111', name: 'Sepolia' },
+      { id: '84532', name: 'Base Sepolia' },
+      { id: '10', name: 'Optimism' },
+      { id: '42161', name: 'Arbitrum One' }
+    ];
+
+    this.logger.info('🔓 Unlocking blockchain analysis tools for priority chains...');
+
+    for (const chain of priorityChains) {
+      try {
+        await this.mcpClient!.callTool('__unlock_blockchain_analysis__', {
+          chain_id: chain.id
+        });
+        this.logger.info(`✅ Unlocked tools for ${chain.name} (${chain.id})`);
+        
+        // Small delay to avoid overwhelming the server
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (e) {
+        this.logger.warn(`⚠️ Failed to unlock ${chain.name} (${chain.id}):`, e);
+      }
+    }
+
+    this.logger.info('🔓 Chain unlock process completed');
   }
 
   async analyzeTransaction(txHash: string, chainId?: number): Promise<AnalysisResult> {
