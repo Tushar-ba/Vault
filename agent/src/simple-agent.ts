@@ -364,9 +364,9 @@ Provide a comprehensive analysis based on the available data.
     try {
       this.logger.info('Executing custom prompt');
       
-      // Enhanced address analysis with multi-chain support
-      if (this.isAddressAnalysisRequest(prompt)) {
-        return await this.performComprehensiveAddressAnalysis(prompt, chainId);
+      // Check for simple transaction query FIRST (before comprehensive analysis)
+      if (this.isSimpleTransactionQuery(prompt)) {
+        return await this.performSimpleTransactionQuery(prompt, chainId);
       }
 
       // Enhanced transaction analysis with multi-chain support
@@ -382,6 +382,11 @@ Provide a comprehensive analysis based on the available data.
       // Token analysis
       if (this.isTokenAnalysisRequest(prompt)) {
         return await this.performTokenAnalysis(prompt, chainId);
+      }
+
+      // Enhanced address analysis with multi-chain support
+      if (this.isAddressAnalysisRequest(prompt)) {
+        return await this.performComprehensiveAddressAnalysis(prompt, chainId);
       }
 
       // Check if the prompt is asking for address balance or info
@@ -627,8 +632,20 @@ Use the data provided above. If no data is available, explain why and suggest al
   }
 
   // Enhanced analysis methods
+  private isSimpleTransactionQuery(prompt: string): boolean {
+    const lowerPrompt = prompt.toLowerCase();
+    const simpleQueryKeywords = [
+      'last transaction', 'latest transaction', 'recent transaction',
+      'fetch transaction', 'get transaction', 'show transaction',
+      'last tx', 'latest tx', 'recent tx'
+    ];
+    const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
+    const isSimpleQuery = simpleQueryKeywords.some(keyword => lowerPrompt.includes(keyword));
+    return hasAddress && isSimpleQuery;
+  }
+
   private isAddressAnalysisRequest(prompt: string): boolean {
-    const addressKeywords = ['analyze', 'safe', 'risk', 'address', 'wallet', 'is this', 'legit', 'suspicious', 'tokens', 'hold', 'holdings', 'portfolio', 'balance', 'what', 'show', 'get'];
+    const addressKeywords = ['analyze', 'safe', 'risk', 'wallet', 'is this', 'legit', 'suspicious'];
     const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
     const hasKeywords = addressKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
     return hasAddress && hasKeywords;
@@ -653,6 +670,69 @@ Use the data provided above. If no data is available, explain why and suggest al
     const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
     const hasKeywords = tokenKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
     return hasAddress && hasKeywords;
+  }
+
+  private async performSimpleTransactionQuery(prompt: string, chainId?: string): Promise<AnalysisResult> {
+    const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
+    if (!addressMatch) {
+      throw new Error('No valid address found in prompt');
+    }
+
+    const address = addressMatch[0];
+    const chain = chainId || '1';
+    this.logger.info(`🔍 Fetching last transaction for: ${address} on chain ${chain}`);
+
+    try {
+      // Fetch the most recent transaction
+      const transactions = await this.callMcpTool('get_transactions_by_address', { 
+        address, 
+        chain_id: chain, 
+        page_size: 1, 
+        order: 'desc' 
+      });
+
+      if (!transactions || !transactions.data || transactions.data.length === 0) {
+        return {
+          success: false,
+          error: `No transactions found for address ${address} on chain ${this.getChainName(chain)}`,
+          timestamp: new Date(),
+        };
+      }
+
+      const lastTx = transactions.data[0];
+      
+      // Format the response in a clean, readable way
+      const response = {
+        chain: this.getChainName(chain),
+        chainId: chain,
+        address: address,
+        lastTransaction: {
+          hash: lastTx.hash,
+          timestamp: lastTx.timestamp,
+          from: lastTx.from,
+          to: lastTx.to,
+          value: lastTx.value,
+          type: lastTx.type,
+          method: lastTx.method || 'transfer',
+          blockNumber: lastTx.block_number,
+          fee: lastTx.fee,
+          status: lastTx.status || 'confirmed'
+        }
+      };
+
+      return {
+        success: true,
+        data: response,
+        timestamp: new Date(),
+      };
+    } catch (error) {
+      this.logger.error(`Error fetching last transaction for ${address}:`, error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        timestamp: new Date(),
+      };
+    }
   }
 
   private async performComprehensiveAddressAnalysis(prompt: string, chainId?: string): Promise<AnalysisResult> {
