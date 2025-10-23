@@ -262,8 +262,16 @@ If this is sufficient to answer the user's question, provide FINAL_ANSWER now.`;
         // No tool call - this is the final response
         finalResponse = this.extractFinalResponse(content);
         
-        // If response is empty or just whitespace, provide a summary
-        if (!finalResponse || finalResponse.trim().length < 10) {
+        // Check if this is a contract analysis request and we have comprehensive data
+        const isContractAnalysis = this.isContractAnalysisRequest(userMessage);
+        const hasAddressInfo = toolCallsMade.some(call => call.tool === 'get_address_info');
+        const hasMultipleTools = toolCallsMade.length >= 2;
+        
+        if (isContractAnalysis && hasAddressInfo && hasMultipleTools) {
+          // Use comprehensive contract analysis
+          finalResponse = this.buildComprehensiveContractAnalysis(toolCallsMade);
+        } else if (!finalResponse || finalResponse.trim().length < 10) {
+          // Fallback to basic summary
           finalResponse = `Analysis complete. I made ${toolCallsMade.length} tool call(s):\n\n` +
             toolCallsMade.map((call, i) => 
               `${i + 1}. ${call.tool}\n   Result: ${JSON.stringify(call.result).substring(0, 200)}...`
@@ -279,8 +287,16 @@ If this is sufficient to answer the user's question, provide FINAL_ANSWER now.`;
       }
 
       if (iteration >= this.maxIterations) {
-        finalResponse = "I've reached the maximum number of analysis steps. Here's what I found:\n\n" + 
-                       JSON.stringify(toolCallsMade, null, 2);
+        // Check if we can provide comprehensive contract analysis
+        const isContractAnalysis = this.isContractAnalysisRequest(userMessage);
+        const hasAddressInfo = toolCallsMade.some(call => call.tool === 'get_address_info');
+        
+        if (isContractAnalysis && hasAddressInfo) {
+          finalResponse = this.buildComprehensiveContractAnalysis(toolCallsMade);
+        } else {
+          finalResponse = "I've reached the maximum number of analysis steps. Here's what I found:\n\n" + 
+                         JSON.stringify(toolCallsMade, null, 2);
+        }
       }
 
       return {
@@ -353,6 +369,8 @@ CAPABILITIES:
 - Investigate creator behavior, token launches, contract safety
 - Handle pagination for large datasets
 - Provide detailed analysis and recommendations
+- Comprehensive contract analysis with risk assessment
+- Multi-tool analysis for thorough investigation
 
 TOOL CALLING FORMAT:
 TOOL_CALL: tool_name
@@ -384,6 +402,13 @@ CRITICAL RULES:
    - Provide risk assessment
 
 6. **ALWAYS PROVIDE FINAL_ANSWER**: After getting tool data, analyze it and provide FINAL_ANSWER. Do NOT output empty responses.
+
+7. **COMPREHENSIVE CONTRACT ANALYSIS**: When analyzing contracts, ALWAYS call multiple tools:
+   - get_address_info (for basic contract info)
+   - get_transactions_by_address (for transaction history)
+   - get_tokens_by_address (for token holdings)
+   - get_token_info (for specific token details if needed)
+   - Then provide detailed analysis with risk assessment
 
 RESPONSE FORMAT:
 - Use TOOL_CALL when you need data
@@ -443,26 +468,53 @@ TOOL_CALL: get_address_info
 ARGS: {"address": "0xB6C58FDB4BBffeD7B7224634AB932518a29e4C4b", "chain_id": "11155111"}
 END_TOOL_CALL
 
-[After receiving contract info showing is_verified: true, is_scam: false, reputation: "ok"]
-FINAL_ANSWER: **Contract Safety Analysis for 0xB6C5...4C4b on Sepolia**
+[After receiving contract info, call additional tools for comprehensive analysis]
+TOOL_CALL: get_transactions_by_address
+ARGS: {"address": "0xB6C58FDB4BBffeD7B7224634AB932518a29e4C4b", "chain_id": "11155111", "page_size": 20, "order": "desc"}
+END_TOOL_CALL
+
+TOOL_CALL: get_tokens_by_address
+ARGS: {"address": "0xB6C58FDB4BBffeD7B7224634AB932518a29e4C4b", "chain_id": "11155111"}
+END_TOOL_CALL
+
+[After receiving all data, provide comprehensive analysis]
+FINAL_ANSWER: **Contract Analysis: Vault (0xB6C5...4C4b) on Sepolia Testnet**
 
 ✅ **SAFE TO INTERACT**
 
 **Contract Details:**
 - Name: Vault
-- Verified: ✅ Yes
+- Type: Smart Contract
+- Verified: ✅ Yes (Source code available)
 - Scam Flag: ✅ No
 - Reputation: OK
 - Creator: 0x49f51...D55
+- Creation TX: 0xf69165d03939a0113bf339b997a9cd67c86118cee1aa3b93b3b4ba6b0728d24a
 
-**Safety Indicators:**
-✅ Contract is verified - source code available
-✅ No scam flags
-✅ Has transaction history
-✅ Created successfully
+**Activity Analysis:**
+- ETH Balance: 0 ETH
+- Has Logs: ✅ Yes (Contract emits events)
+- Has Token Transfers: ✅ Yes
+- Has Tokens: ✅ Yes
+- Transaction Count: [From transaction data]
+
+**Token Holdings:**
+[From token data - list all tokens with balances]
+
+**Risk Assessment:**
+- ✅ Contract is verified - source code available
+- ✅ No scam flags detected
+- ✅ Has transaction history
+- ✅ Created successfully
+- ✅ Creator address has good reputation
 
 **Risk Level: LOW**
 This contract appears safe for interaction on Sepolia testnet.
+
+**Recommendations:**
+- Review the verified source code before interacting
+- Check transaction patterns for any unusual activity
+- Verify token holdings and transfer patterns
 
 User: "What tokens did creator 0xDEF... launch?"
 Assistant:
@@ -588,6 +640,18 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     return multiChainKeywords.some(keyword => lowerMessage.includes(keyword));
   }
 
+  // Check if the user message is requesting contract analysis
+  private isContractAnalysisRequest(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const contractKeywords = [
+      'analyze', 'analysis', 'contract', 'safety', 'risk', 'assess',
+      'evaluate', 'check', 'investigate', 'examine', 'review'
+    ];
+    const hasContractKeyword = contractKeywords.some(keyword => lowerMessage.includes(keyword));
+    const hasAddress = /0x[a-fA-F0-9]{40}/.test(message);
+    return hasContractKeyword && hasAddress;
+  }
+
   // Extract address from user message
   private extractAddressFromMessage(message: string): string {
     const addressMatch = message.match(/0x[a-fA-F0-9]{40}/);
@@ -634,6 +698,171 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     }
 
     return `Multi-chain activity summary for the address:\n${lines.join('\n')}`;
+  }
+
+  // Build a comprehensive contract analysis from multiple tool results
+  private buildComprehensiveContractAnalysis(toolCallsMade: any[]): string {
+    const addressInfo = toolCallsMade.find(call => call.tool === 'get_address_info');
+    const transactionInfo = toolCallsMade.find(call => call.tool === 'get_transactions_by_address');
+    const tokenInfo = toolCallsMade.find(call => call.tool === 'get_tokens_by_address');
+
+    if (!addressInfo) {
+      return 'Insufficient data for contract analysis. Please try again.';
+    }
+
+    const basic = addressInfo.result?.data?.basic_info || {};
+    const chainId = String(addressInfo.args?.chain_id ?? 'unknown');
+    const chainNames: Record<string, string> = {
+      '1': 'Ethereum Mainnet',
+      '11155111': 'Sepolia Testnet',
+      '84532': 'Base Sepolia',
+      '10': 'Optimism',
+      '42161': 'Arbitrum One'
+    };
+    const chainName = chainNames[chainId] || `Chain ${chainId}`;
+
+    // Convert wei to ETH
+    const balanceWei = basic.coin_balance ?? '0';
+    const balanceEth = (() => {
+      try {
+        const len = balanceWei.length;
+        if (len === 0) return '0';
+        const whole = len > 18 ? balanceWei.slice(0, len - 18) : '0';
+        const frac = balanceWei.padStart(19, '0').slice(-18).replace(/0+$/, '') || '0';
+        return frac === '0' ? whole : `${whole}.${frac}`;
+      } catch {
+        return '0';
+      }
+    })();
+
+    // Determine risk level
+    let riskLevel = 'UNKNOWN';
+    let riskIndicators: string[] = [];
+    
+    if (basic.is_verified === true) {
+      riskIndicators.push('✅ Contract is verified - source code available');
+    } else {
+      riskIndicators.push('⚠️ Contract is not verified - no source code');
+    }
+
+    if (basic.is_scam === false) {
+      riskIndicators.push('✅ No scam flags detected');
+    } else if (basic.is_scam === true) {
+      riskIndicators.push('🚨 SCAM FLAG DETECTED - DO NOT INTERACT');
+    }
+
+    if (basic.reputation === 'ok') {
+      riskIndicators.push('✅ Good reputation');
+    } else if (basic.reputation === 'warning') {
+      riskIndicators.push('⚠️ Reputation warning');
+    }
+
+    if (basic.creation_status === 'success') {
+      riskIndicators.push('✅ Contract created successfully');
+    }
+
+    if (basic.has_logs === true) {
+      riskIndicators.push('✅ Contract emits events (has logs)');
+    }
+
+    // Calculate risk level
+    const hasScamFlag = basic.is_scam === true;
+    const isVerified = basic.is_verified === true;
+    const hasGoodReputation = basic.reputation === 'ok';
+    const hasActivity = basic.has_token_transfers === true || basic.has_tokens === true;
+
+    if (hasScamFlag) {
+      riskLevel = 'HIGH - SCAM DETECTED';
+    } else if (!isVerified && !hasGoodReputation) {
+      riskLevel = 'MEDIUM - Unverified contract with poor reputation';
+    } else if (!isVerified) {
+      riskLevel = 'MEDIUM - Unverified contract';
+    } else if (hasGoodReputation && hasActivity) {
+      riskLevel = 'LOW - Safe to interact';
+    } else {
+      riskLevel = 'LOW - Appears safe';
+    }
+
+    // Build response
+    const lines: string[] = [];
+    lines.push(`**Contract Analysis: ${basic.name || 'Unknown'} (${basic.hash?.slice(0, 6)}...${basic.hash?.slice(-4)}) on ${chainName}**`);
+    lines.push('');
+    
+    if (riskLevel.includes('HIGH')) {
+      lines.push('🚨 **DO NOT INTERACT**');
+    } else if (riskLevel.includes('MEDIUM')) {
+      lines.push('⚠️ **PROCEED WITH CAUTION**');
+    } else {
+      lines.push('✅ **SAFE TO INTERACT**');
+    }
+    
+    lines.push('');
+    lines.push('**Contract Details:**');
+    lines.push(`- Name: ${basic.name || 'Unknown'}`);
+    lines.push(`- Type: ${basic.is_contract ? 'Smart Contract' : 'EOA'}`);
+    lines.push(`- Verified: ${basic.is_verified ? '✅ Yes (Source code available)' : '❌ No'}`);
+    lines.push(`- Scam Flag: ${basic.is_scam ? '🚨 YES' : '✅ No'}`);
+    lines.push(`- Reputation: ${basic.reputation || 'Unknown'}`);
+    if (basic.creator_address_hash) {
+      lines.push(`- Creator: ${basic.creator_address_hash.slice(0, 6)}...${basic.creator_address_hash.slice(-4)}`);
+    }
+    if (basic.creation_transaction_hash) {
+      lines.push(`- Creation TX: ${basic.creation_transaction_hash}`);
+    }
+    
+    lines.push('');
+    lines.push('**Activity Analysis:**');
+    lines.push(`- ETH Balance: ${balanceEth} ETH`);
+    lines.push(`- Has Logs: ${basic.has_logs ? '✅ Yes (Contract emits events)' : '❌ No'}`);
+    lines.push(`- Has Token Transfers: ${basic.has_token_transfers ? '✅ Yes' : '❌ No'}`);
+    lines.push(`- Has Tokens: ${basic.has_tokens ? '✅ Yes' : '❌ No'}`);
+    
+    if (transactionInfo?.result?.data) {
+      const txCount = Array.isArray(transactionInfo.result.data) ? transactionInfo.result.data.length : 0;
+      lines.push(`- Recent Transactions: ${txCount} (last 20)`);
+    }
+    
+    lines.push('');
+    lines.push('**Token Holdings:**');
+    if (tokenInfo?.result?.data && Array.isArray(tokenInfo.result.data) && tokenInfo.result.data.length > 0) {
+      tokenInfo.result.data.forEach((token: any, index: number) => {
+        const balance = token.balance ? (parseInt(token.balance) / Math.pow(10, parseInt(token.decimals || '18'))).toFixed(6) : '0';
+        lines.push(`${index + 1}. ${token.name} (${token.symbol}): ${balance}`);
+      });
+    } else {
+      lines.push('No tokens found or token data not available');
+    }
+    
+    lines.push('');
+    lines.push('**Risk Assessment:**');
+    riskIndicators.forEach(indicator => lines.push(`- ${indicator}`));
+    
+    lines.push('');
+    lines.push(`**Risk Level: ${riskLevel}**`);
+    
+    if (riskLevel.includes('HIGH')) {
+      lines.push('🚨 **DO NOT INTERACT WITH THIS CONTRACT**');
+    } else if (riskLevel.includes('MEDIUM')) {
+      lines.push('⚠️ **Exercise extreme caution before interacting**');
+    } else {
+      lines.push('✅ **This contract appears safe for interaction**');
+    }
+    
+    lines.push('');
+    lines.push('**Recommendations:**');
+    if (basic.is_verified) {
+      lines.push('- ✅ Review the verified source code before interacting');
+    } else {
+      lines.push('- ⚠️ Contract is unverified - review with extreme caution');
+    }
+    lines.push('- Check transaction patterns for any unusual activity');
+    lines.push('- Verify token holdings and transfer patterns');
+    if (basic.creator_address_hash) {
+      lines.push('- Investigate the creator address for past behavior');
+    }
+    lines.push('- Consider starting with small test transactions');
+
+    return lines.join('\n');
   }
 
   clearHistory(): void {
