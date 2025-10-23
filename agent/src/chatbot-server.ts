@@ -23,7 +23,11 @@ export class ChatbotServer {
 
   private setupMiddleware(): void {
     this.app.use(helmet());
-    this.app.use(cors());
+    this.app.use(cors({
+      origin: '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization']
+    }));
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   }
@@ -47,10 +51,10 @@ export class ChatbotServer {
           return res.status(400).json({ error: 'Message is required' });
         }
 
-        logger.info(`Chat request: ${message}`);
+        logger.info(`Chat request: ${message}${chainId ? ` (Chain: ${chainId})` : ''}`);
         
         // Use the agent to process the message
-        const result = await this.agent.executeCustomPrompt(message);
+        const result = await this.agent.executeCustomPrompt(message, chainId);
         
         return res.json({
           success: true,
@@ -83,16 +87,61 @@ export class ChatbotServer {
       res.json({
         success: true,
         examples: [
-          "What is the balance of address 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Sepolia?",
-          "Get transaction history for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Sepolia chain",
+          // Address Analysis (Multi-chain)
+          "Is this address safe? 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55",
+          "Analyze this wallet: 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          "Is 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D a legitimate address?",
+          "What's the risk score for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55?",
+          
+          // Transaction Analysis (Multi-chain)
+          "Analyze this transaction: 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+          "Is this transaction legit? 0x0d4110bf509c19a0715e3d45de48e732fa6f965b5f9db0484679babd4fc84a21",
+          "What happened in this transaction? 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+          
+          // Contract Analysis
+          "What contracts has 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 interacted with?",
+          "Analyze the contract interactions for 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          "What protocols does this address use? 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+          
+          // Token Analysis
+          "What tokens has 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 interacted with?",
+          "Show me all token interactions for 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          
+          // General Queries
           "What is the latest block on Ethereum mainnet?",
-          "Show me token holdings for address 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55",
-          "Analyze transaction 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-          "What chains are supported by Blockscout?",
-          "Get contract ABI for address 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D on Ethereum"
+          "What chains are supported by Blockscout?"
         ],
         timestamp: new Date().toISOString()
       });
+    });
+
+    // Test endpoint to check raw MCP data
+    this.app.get('/test-mcp/:address', async (req, res) => {
+      try {
+        const address = req.params.address;
+        if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+          return res.status(400).json({ error: 'Invalid address format' });
+        }
+
+        // Test MCP data fetching directly
+        const mcpData = await this.agent.callMcpTool('get_tokens_by_address', { 
+          address, 
+          chain_id: '1', 
+          page_size: 10 
+        });
+
+        return res.json({
+          address,
+          chain: 'Ethereum Mainnet',
+          mcpData,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        return res.status(500).json({ 
+          error: 'Failed to fetch MCP data', 
+          details: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      }
     });
   }
 

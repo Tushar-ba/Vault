@@ -6,11 +6,15 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "dev": "nodemon --exec tsx src/chatbot-server.ts",
-    "start": "node dist/chatbot-server.js",
-    "chatbot": "tsc && node dist/chatbot-server.js",
+    "dev": "nodemon --exec tsx src/intelligent-chatbot-server.ts",
+    "dev:old": "nodemon --exec tsx src/chatbot-server.ts",
+    "start": "node dist/intelligent-chatbot-server.js",
+    "start:old": "node dist/chatbot-server.js",
+    "chatbot": "tsc && node dist/intelligent-chatbot-server.js",
+    "chatbot:old": "tsc && node dist/chatbot-server.js",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:features": "node test-features.js",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },

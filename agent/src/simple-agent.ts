@@ -76,7 +76,7 @@ export class SimpleBlockscoutAgent {
     }
   }
 
-  private async callMcpTool(toolName: string, args: any): Promise<any> {
+  async callMcpTool(toolName: string, args: any): Promise<any> {
     if (!this.mcpClient) {
       throw new Error('MCP Client not connected');
     }
@@ -91,8 +91,54 @@ export class SimpleBlockscoutAgent {
 
     const result = await this.mcpClient.callTool(toolName, args);
 
-    this.logger.info(`MCP tool ${toolName} result:`, result);
-    return result.content;
+    this.logger.info(`MCP tool ${toolName} raw result:`, JSON.stringify(result).substring(0, 200));
+    
+    // Handle both response formats:
+    // 1. {content: [{type: "text", text: "..."}]} - wrapped format
+    // 2. [{type: "text", text: "..."}] - direct array format
+    
+    let contentArray;
+    if (Array.isArray(result)) {
+      // Direct array format from DockerMCPClient
+      contentArray = result;
+    } else if (result.content && Array.isArray(result.content)) {
+      // Wrapped format
+      contentArray = result.content;
+    } else {
+      this.logger.warn(`MCP tool ${toolName} returning unexpected format:`, result);
+      return result;
+    }
+    
+    // Parse the first content item
+    if (contentArray.length > 0 && contentArray[0].type === 'text') {
+      try {
+        const parsed = JSON.parse(contentArray[0].text);
+        this.logger.info(`MCP tool ${toolName} parsed result:`, JSON.stringify(parsed).substring(0, 200));
+        return parsed;
+      } catch (error) {
+        this.logger.warn(`Failed to parse MCP response as JSON:`, error);
+        return contentArray[0].text;
+      }
+    }
+    
+    this.logger.warn(`MCP tool ${toolName} returning raw content (unexpected format)`);
+    return contentArray;
+  }
+
+  private getChainName(chainId: string): string {
+    const chainNames: { [key: string]: string } = {
+      '1': 'Ethereum Mainnet',
+      '11155111': 'Sepolia',
+      '84532': 'Base Sepolia',
+      '10': 'Optimism',
+      '42161': 'Arbitrum One',
+      '137': 'Polygon',
+      '56': 'BSC',
+      '43114': 'Avalanche',
+      '250': 'Fantom',
+      '25': 'Cronos'
+    };
+    return chainNames[chainId] || `Chain ${chainId}`;
   }
 
   private async unlockMultipleChains(): Promise<void> {
@@ -310,7 +356,7 @@ Provide a comprehensive analysis based on the available data.
     }
   }
 
-  async executeCustomPrompt(prompt: string): Promise<AnalysisResult> {
+  async executeCustomPrompt(prompt: string, chainId?: string): Promise<AnalysisResult> {
     if (!this.isInitialized) {
       throw new Error('Agent not initialized. Call initialize() first.');
     }
@@ -318,80 +364,29 @@ Provide a comprehensive analysis based on the available data.
     try {
       this.logger.info('Executing custom prompt');
       
-      // Check if the prompt is asking to analyze an address (risk, info, txs, tokens)
-      if (prompt.toLowerCase().includes('analyze') && prompt.match(/0x[a-fA-F0-9]{40}/)) {
-        const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
-        if (addressMatch) {
-          const address = addressMatch[0];
-          const chainIdMatch = prompt.match(/chain_id\s*\"(\d+)\"/i);
-          const chainIdStr = chainIdMatch ? chainIdMatch[1] : '1';
-          this.logger.info(`Detected address analysis request for: ${address} on chain ${chainIdStr}`);
+      // Check for simple transaction query FIRST (before comprehensive analysis)
+      if (this.isSimpleTransactionQuery(prompt)) {
+        return await this.performSimpleTransactionQuery(prompt, chainId);
+      }
 
-          let addressInfo: any = null;
-          let addressTags: any = null;
-          let tokens: any = null;
-          let txs: any = null;
-          try {
-            addressInfo = await this.callMcpTool('get_address_info', { address, chain_id: chainIdStr });
-          } catch (e) {
-            this.logger.warn('get_address_info failed', e);
-          }
-          try {
-            addressTags = await this.callMcpTool('get_address_tags', { address, chain_id: chainIdStr });
-          } catch (e) {
-            this.logger.warn('get_address_tags failed', e);
-          }
-          try {
-            tokens = await this.callMcpTool('get_tokens_by_address', { address, chain_id: chainIdStr, page_size: 200 });
-          } catch (e) {
-            this.logger.warn('get_tokens_by_address failed', e);
-          }
-          try {
-            txs = await this.callMcpTool('get_transactions_by_address', { address, chain_id: chainIdStr, page_size: 200, order: 'asc' });
-          } catch (e) {
-            this.logger.warn('get_transactions_by_address failed', e);
-          }
+      // Enhanced transaction analysis with multi-chain support
+      if (this.isTransactionAnalysisRequest(prompt)) {
+        return await this.performComprehensiveTransactionAnalysis(prompt, chainId);
+      }
 
-          // Simple risk scoring
-          let riskScore = 0;
-          const reasons: string[] = [];
-          const aiTags = [
-            ...(addressInfo?.public_tags || []),
-            ...(addressInfo?.private_tags || []),
-            ...(addressTags?.public_tags || []),
-            ...(addressTags?.private_tags || [])
-          ].map((t: any) => (typeof t === 'string' ? t : (t?.name || ''))).join(' ').toLowerCase();
+      // Contract analysis
+      if (this.isContractAnalysisRequest(prompt)) {
+        return await this.performContractAnalysis(prompt, chainId);
+      }
 
-          if (addressInfo?.is_scam) { riskScore += 5; reasons.push('Flagged as scam by explorer'); }
-          if (addressInfo?.reputation && addressInfo.reputation !== 'ok') { riskScore += 3; reasons.push(`Reputation: ${addressInfo.reputation}`); }
-          if (/sanction|ofac|exploiter|exploit|hack|ronin|bridge.*exploit/i.test(aiTags)) { riskScore = 10; reasons.push('Sanctioned / Exploiter tags detected'); }
+      // Token analysis
+      if (this.isTokenAnalysisRequest(prompt)) {
+        return await this.performTokenAnalysis(prompt, chainId);
+      }
 
-          // Balance threshold
-          const balanceWei = BigInt(addressInfo?.coin_balance ?? '0');
-          const oneHundredEthWei = BigInt('100000000000000000000');
-          if (balanceWei > oneHundredEthWei) { riskScore += 1; reasons.push('High native balance'); }
-
-          // Activity threshold
-          const txCount = (txs?.items?.length) ?? 0;
-          if (txCount > 500) { riskScore += 1; reasons.push('High transaction activity'); }
-
-          if (riskScore > 10) riskScore = 10;
-
-          const analysisPrompt = `
-Address risk assessment request\n\nAddress: ${address}\nChainId: ${chainIdStr}\n\nAddress Info: ${JSON.stringify(addressInfo || {}, null, 2)}\n\nAddress Tags: ${JSON.stringify(addressTags || {}, null, 2)}\n\nToken Holdings (truncated): ${JSON.stringify(tokens || {}, null, 2)}\n\nTransactions (first page asc, truncated): ${JSON.stringify(txs || {}, null, 2)}\n\nBased on the data above, compute a risk score from 0 (safe) to 10 (dangerous).\nExplain the rationale with concrete evidence (tags, balances, counterparties, tx hashes, dates).\nHighlight any sanctions/exploiter indications and known hack involvement.\nProvide clear recommendations (avoid, monitor, freeze, report, etc.).\nCurrent heuristic pre-score: ${riskScore} with reasons: ${reasons.join('; ') || 'none'}.\nAdjust if the detailed evidence supports a higher score.`;
-
-          const messages = [
-            new SystemMessage('You are a blockchain risk analyst. Be precise and cite concrete evidence.'),
-            new HumanMessage(analysisPrompt)
-          ];
-
-          const result = await this.llm.invoke(messages);
-          return {
-            success: true,
-            data: result.content,
-            timestamp: new Date(),
-          };
-        }
+      // Enhanced address analysis with multi-chain support
+      if (this.isAddressAnalysisRequest(prompt)) {
+        return await this.performComprehensiveAddressAnalysis(prompt, chainId);
       }
 
       // Check if the prompt is asking for address balance or info
@@ -634,6 +629,547 @@ Use the data provided above. If no data is available, explain why and suggest al
         timestamp: new Date(),
       };
     }
+  }
+
+  // Enhanced analysis methods
+  private isSimpleTransactionQuery(prompt: string): boolean {
+    const lowerPrompt = prompt.toLowerCase();
+    const simpleQueryKeywords = [
+      'last transaction', 'latest transaction', 'recent transaction',
+      'fetch transaction', 'get transaction', 'show transaction',
+      'last tx', 'latest tx', 'recent tx'
+    ];
+    const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
+    const isSimpleQuery = simpleQueryKeywords.some(keyword => lowerPrompt.includes(keyword));
+    return hasAddress && isSimpleQuery;
+  }
+
+  private isAddressAnalysisRequest(prompt: string): boolean {
+    const addressKeywords = ['analyze', 'safe', 'risk', 'wallet', 'is this', 'legit', 'suspicious'];
+    const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
+    const hasKeywords = addressKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
+    return hasAddress && hasKeywords;
+  }
+
+  private isTransactionAnalysisRequest(prompt: string): boolean {
+    const txKeywords = ['transaction', 'tx', 'hash', 'analyze', 'legit', 'safe'];
+    const hasTxHash = /0x[a-fA-F0-9]{64}/.test(prompt);
+    const hasKeywords = txKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
+    return hasTxHash && hasKeywords;
+  }
+
+  private isContractAnalysisRequest(prompt: string): boolean {
+    const contractKeywords = ['contract', 'interact', 'interaction', 'dapp', 'protocol'];
+    const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
+    const hasKeywords = contractKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
+    return hasAddress && hasKeywords;
+  }
+
+  private isTokenAnalysisRequest(prompt: string): boolean {
+    const tokenKeywords = ['tokens', 'token', 'hold', 'holdings', 'portfolio', 'balance', 'what', 'show', 'get'];
+    const hasAddress = /0x[a-fA-F0-9]{40}/.test(prompt);
+    const hasKeywords = tokenKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
+    return hasAddress && hasKeywords;
+  }
+
+  private async performSimpleTransactionQuery(prompt: string, chainId?: string): Promise<AnalysisResult> {
+    const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
+    if (!addressMatch) {
+      throw new Error('No valid address found in prompt');
+    }
+
+    const address = addressMatch[0];
+    const chain = chainId || '1';
+    this.logger.info(`🔍 Fetching last transaction for: ${address} on chain ${chain}`);
+
+    try {
+      // Fetch the most recent transaction
+      const transactions = await this.callMcpTool('get_transactions_by_address', { 
+        address, 
+        chain_id: chain, 
+        page_size: 1, 
+        order: 'desc' 
+      });
+
+      if (!transactions || !transactions.data || transactions.data.length === 0) {
+        return {
+          success: false,
+          error: `No transactions found for address ${address} on chain ${this.getChainName(chain)}`,
+          timestamp: new Date(),
+        };
+      }
+
+      const lastTx = transactions.data[0];
+      
+      // Format the response in a clean, readable way
+      const response = {
+        chain: this.getChainName(chain),
+        chainId: chain,
+        address: address,
+        lastTransaction: {
+          hash: lastTx.hash,
+          timestamp: lastTx.timestamp,
+          from: lastTx.from,
+          to: lastTx.to,
+          value: lastTx.value,
+          type: lastTx.type,
+          method: lastTx.method || 'transfer',
+          blockNumber: lastTx.block_number,
+          fee: lastTx.fee,
+          status: lastTx.status || 'confirmed'
+        }
+      };
+
+      return {
+        success: true,
+        data: response,
+        timestamp: new Date(),
+      };
+    } catch (error) {
+      this.logger.error(`Error fetching last transaction for ${address}:`, error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        timestamp: new Date(),
+      };
+    }
+  }
+
+  private async performComprehensiveAddressAnalysis(prompt: string, chainId?: string): Promise<AnalysisResult> {
+    const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
+    if (!addressMatch) {
+      throw new Error('No valid address found in prompt');
+    }
+
+    const address = addressMatch[0];
+    this.logger.info(`🔍 Performing comprehensive address analysis for: ${address}${chainId ? ` on chain ${chainId}` : ''}`);
+
+    // Use specified chain or analyze all priority chains
+    const chains = chainId ? 
+      [{ id: chainId, name: this.getChainName(chainId) }] :
+      [
+        { id: '1', name: 'Ethereum Mainnet' },
+        { id: '11155111', name: 'Sepolia' },
+        { id: '84532', name: 'Base Sepolia' },
+        { id: '10', name: 'Optimism' },
+        { id: '42161', name: 'Arbitrum One' }
+      ];
+
+    const chainData: any = {};
+    let totalRiskScore = 0;
+    let chainCount = 0;
+
+    // Collect data from all chains
+    for (const chain of chains) {
+      try {
+        this.logger.info(`📊 Analyzing ${address} on ${chain.name}...`);
+        
+        const [addressInfo, addressTags, tokens, transactions] = await Promise.allSettled([
+          this.callMcpTool('get_address_info', { address, chain_id: chain.id }),
+          this.callMcpTool('get_address_tags', { address, chain_id: chain.id }),
+          this.callMcpTool('get_tokens_by_address', { address, chain_id: chain.id, page_size: 100 }),
+          this.callMcpTool('get_transactions_by_address', { address, chain_id: chain.id, page_size: 50, order: 'desc' })
+        ]);
+
+        const chainInfo = {
+          addressInfo: addressInfo.status === 'fulfilled' ? addressInfo.value : null,
+          addressTags: addressTags.status === 'fulfilled' ? addressTags.value : null,
+          tokens: tokens.status === 'fulfilled' ? tokens.value : null,
+          transactions: transactions.status === 'fulfilled' ? transactions.value : null
+        };
+
+        if (chainInfo.addressInfo || chainInfo.transactions) {
+          chainData[chain.name] = chainInfo;
+          chainCount++;
+          
+          // Calculate risk score for this chain
+          const riskScore = this.calculateAddressRiskScore(chainInfo, chain.name);
+          totalRiskScore += riskScore;
+        }
+
+        // Small delay to avoid overwhelming the server
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (error) {
+        this.logger.warn(`⚠️ Failed to analyze ${address} on ${chain.name}:`, error);
+      }
+    }
+
+    const averageRiskScore = chainCount > 0 ? Math.round(totalRiskScore / chainCount) : 0;
+
+    const analysisPrompt = `
+COMPREHENSIVE ADDRESS ANALYSIS REPORT
+
+Address: ${address}
+Chains Analyzed: ${chainCount} chains
+Overall Risk Score: ${averageRiskScore}/10
+
+DETAILED CHAIN DATA:
+${JSON.stringify(chainData, null, 2)}
+
+ANALYSIS REQUIREMENTS:
+1. **SAFETY ASSESSMENT**: Is this address safe to interact with? (Yes/No with reasoning)
+2. **RISK BREAKDOWN**: Detailed risk factors from each chain
+3. **ACTIVITY PATTERNS**: Transaction patterns, frequency, amounts
+4. **TOKEN INTERACTIONS**: All tokens interacted with across chains
+5. **CONTRACT INTERACTIONS**: Smart contracts and protocols used
+6. **REPUTATION**: Tags, labels, and known associations
+7. **CROSS-CHAIN BEHAVIOR**: Activity consistency across chains
+8. **RECOMMENDATIONS**: Specific actions (SAFE, CAUTION, AVOID, REPORT)
+
+Provide a comprehensive analysis with specific evidence from the data above. Be detailed and cite specific transaction hashes, contract addresses, and dates when relevant.`;
+
+    const messages = [
+      new SystemMessage(`You are an expert blockchain security analyst. Analyze the provided data comprehensively and provide detailed insights with specific evidence.`),
+      new HumanMessage(analysisPrompt)
+    ];
+
+    const result = await this.llm.invoke(messages);
+    return {
+      success: true,
+      data: result.content,
+      timestamp: new Date(),
+    };
+  }
+
+  private async performComprehensiveTransactionAnalysis(prompt: string, chainId?: string): Promise<AnalysisResult> {
+    const txMatch = prompt.match(/0x[a-fA-F0-9]{64}/);
+    if (!txMatch) {
+      throw new Error('No valid transaction hash found in prompt');
+    }
+
+    const txHash = txMatch[0];
+    this.logger.info(`🔍 Performing comprehensive transaction analysis for: ${txHash}${chainId ? ` on chain ${chainId}` : ''}`);
+
+    // Use specified chain or search all priority chains
+    const chains = chainId ? 
+      [{ id: chainId, name: this.getChainName(chainId) }] :
+      [
+        { id: '1', name: 'Ethereum Mainnet' },
+        { id: '11155111', name: 'Sepolia' },
+        { id: '84532', name: 'Base Sepolia' },
+        { id: '10', name: 'Optimism' },
+        { id: '42161', name: 'Arbitrum One' }
+      ];
+
+    const chainData: any = {};
+    let foundOnChains: string[] = [];
+
+    // Search transaction across all chains
+    for (const chain of chains) {
+      try {
+        this.logger.info(`🔍 Searching ${txHash} on ${chain.name}...`);
+        
+        const [txInfo, txLogs] = await Promise.allSettled([
+          this.callMcpTool('get_transaction_info', { transaction_hash: txHash, chain_id: chain.id }),
+          this.callMcpTool('get_transaction_logs', { transaction_hash: txHash, chain_id: chain.id })
+        ]);
+
+        if (txInfo.status === 'fulfilled' && txInfo.value) {
+          chainData[chain.name] = {
+            transaction: txInfo.value,
+            logs: txLogs.status === 'fulfilled' ? txLogs.value : null
+          };
+          foundOnChains.push(chain.name);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (error) {
+        this.logger.warn(`⚠️ Transaction not found on ${chain.name}`);
+      }
+    }
+
+    if (foundOnChains.length === 0) {
+      return {
+        success: false,
+        error: 'Transaction not found on any supported chain',
+        timestamp: new Date(),
+      };
+    }
+
+    const analysisPrompt = `
+COMPREHENSIVE TRANSACTION ANALYSIS REPORT
+
+Transaction Hash: ${txHash}
+Found on Chains: ${foundOnChains.join(', ')}
+
+DETAILED TRANSACTION DATA:
+${JSON.stringify(chainData, null, 2)}
+
+ANALYSIS REQUIREMENTS:
+1. **LEGITIMACY**: Is this transaction legitimate? (Yes/No with reasoning)
+2. **TRANSACTION DETAILS**: From, to, value, gas, method calls
+3. **CONTRACT INTERACTIONS**: Which contracts were called and why
+4. **TOKEN TRANSFERS**: All token movements and amounts
+5. **RISK ASSESSMENT**: Security concerns, MEV, suspicious patterns
+6. **BEHAVIORAL ANALYSIS**: Transaction patterns and intent
+7. **CROSS-CHAIN IMPACT**: Effects across different chains
+8. **RECOMMENDATIONS**: Safety recommendations and warnings
+
+Provide detailed analysis with specific evidence from the transaction data.`;
+
+    const messages = [
+      new SystemMessage(`You are an expert blockchain transaction analyst. Analyze the provided transaction data comprehensively and provide detailed insights with specific evidence.`),
+      new HumanMessage(analysisPrompt)
+    ];
+
+    const result = await this.llm.invoke(messages);
+    return {
+      success: true,
+      data: result.content,
+      timestamp: new Date(),
+    };
+  }
+
+  private async performContractAnalysis(prompt: string, chainId?: string): Promise<AnalysisResult> {
+    const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
+    if (!addressMatch) {
+      throw new Error('No valid contract address found in prompt');
+    }
+
+    const contractAddress = addressMatch[0];
+    this.logger.info(`🔍 Performing contract analysis for: ${contractAddress}${chainId ? ` on chain ${chainId}` : ''}`);
+
+    // Use specified chain or search all priority chains
+    const chains = chainId ? 
+      [{ id: chainId, name: this.getChainName(chainId) }] :
+      [
+        { id: '1', name: 'Ethereum Mainnet' },
+        { id: '11155111', name: 'Sepolia' },
+        { id: '84532', name: 'Base Sepolia' },
+        { id: '10', name: 'Optimism' },
+        { id: '42161', name: 'Arbitrum One' }
+      ];
+
+    const chainData: any = {};
+    let foundOnChains: string[] = [];
+
+    for (const chain of chains) {
+      try {
+        this.logger.info(`🔍 Analyzing contract ${contractAddress} on ${chain.name}...`);
+        
+        const [contractInfo, contractABI, contractCode] = await Promise.allSettled([
+          this.callMcpTool('get_address_info', { address: contractAddress, chain_id: chain.id }),
+          this.callMcpTool('get_contract_abi', { address: contractAddress, chain_id: chain.id }),
+          this.callMcpTool('inspect_contract_code', { address: contractAddress, chain_id: chain.id })
+        ]);
+
+        if (contractInfo.status === 'fulfilled' && contractInfo.value) {
+          chainData[chain.name] = {
+            contractInfo: contractInfo.value,
+            abi: contractABI.status === 'fulfilled' ? contractABI.value : null,
+            sourceCode: contractCode.status === 'fulfilled' ? contractCode.value : null
+          };
+          foundOnChains.push(chain.name);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (error) {
+        this.logger.warn(`⚠️ Contract not found on ${chain.name}`);
+      }
+    }
+
+    if (foundOnChains.length === 0) {
+      return {
+        success: false,
+        error: 'Contract not found on any supported chain',
+        timestamp: new Date(),
+      };
+    }
+
+    const analysisPrompt = `
+COMPREHENSIVE CONTRACT ANALYSIS REPORT
+
+Contract Address: ${contractAddress}
+Found on Chains: ${foundOnChains.join(', ')}
+
+DETAILED CONTRACT DATA:
+${JSON.stringify(chainData, null, 2)}
+
+ANALYSIS REQUIREMENTS:
+1. **CONTRACT PURPOSE**: What does this contract do?
+2. **SECURITY ASSESSMENT**: Vulnerabilities, risks, and security concerns
+3. **FUNCTIONALITY**: Key functions and their purposes
+4. **UPGRADEABILITY**: Proxy patterns, admin controls, upgrade mechanisms
+5. **TOKEN INTERACTIONS**: ERC standards, token handling
+6. **GOVERNANCE**: Admin roles, ownership, control mechanisms
+7. **AUDIT STATUS**: Known audits, verification status
+8. **RECOMMENDATIONS**: Safety recommendations for interaction
+
+Provide detailed analysis with specific evidence from the contract data.`;
+
+    const messages = [
+      new SystemMessage(`You are an expert smart contract security analyst. Analyze the provided contract data comprehensively and provide detailed insights with specific evidence.`),
+      new HumanMessage(analysisPrompt)
+    ];
+
+    const result = await this.llm.invoke(messages);
+    return {
+      success: true,
+      data: result.content,
+      timestamp: new Date(),
+    };
+  }
+
+  private calculateAddressRiskScore(chainInfo: any, chainName: string): number {
+    let riskScore = 0;
+    const reasons: string[] = [];
+
+    // Check address info
+    if (chainInfo.addressInfo) {
+      const info = chainInfo.addressInfo;
+      
+      if (info.is_scam) { riskScore += 5; reasons.push(`${chainName}: Flagged as scam`); }
+      if (info.reputation && info.reputation !== 'ok') { 
+        riskScore += 3; 
+        reasons.push(`${chainName}: Reputation ${info.reputation}`); 
+      }
+      
+      // High balance check
+      const balanceWei = BigInt(info.coin_balance ?? '0');
+      const oneHundredEthWei = BigInt('100000000000000000000');
+      if (balanceWei > oneHundredEthWei) { 
+        riskScore += 1; 
+        reasons.push(`${chainName}: High native balance`); 
+      }
+    }
+
+    // Check tags
+    if (chainInfo.addressTags) {
+      const tags = [
+        ...(chainInfo.addressTags.public_tags || []),
+        ...(chainInfo.addressTags.private_tags || [])
+      ].map((t: any) => (typeof t === 'string' ? t : (t?.name || ''))).join(' ').toLowerCase();
+
+      if (/sanction|ofac|exploiter|exploit|hack|ronin|bridge.*exploit/i.test(tags)) { 
+        riskScore = 10; 
+        reasons.push(`${chainName}: Sanctioned/Exploiter tags`); 
+      }
+    }
+
+    // Check transaction activity
+    if (chainInfo.transactions) {
+      const txCount = chainInfo.transactions.items?.length || 0;
+      if (txCount > 100) { 
+        riskScore += 1; 
+        reasons.push(`${chainName}: High transaction activity`); 
+      }
+    }
+
+    return Math.min(riskScore, 10);
+  }
+
+  private async performTokenAnalysis(prompt: string, chainId?: string): Promise<AnalysisResult> {
+    const addressMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
+    if (!addressMatch) {
+      throw new Error('No valid address found in prompt');
+    }
+
+    const address = addressMatch[0];
+    this.logger.info(`🪙 Performing token analysis for: ${address}${chainId ? ` on chain ${chainId}` : ''}`);
+
+    // Use specified chain or default to Ethereum Mainnet
+    const chains = chainId ? 
+      [{ id: chainId, name: this.getChainName(chainId) }] :
+      [{ id: '1', name: 'Ethereum Mainnet' }];
+
+    const chainData: any = {};
+    let totalTokens = 0;
+    let chainCount = 0;
+
+    // Collect token data from all chains
+    for (const chain of chains) {
+      try {
+        this.logger.info(`🪙 Analyzing tokens for ${address} on ${chain.name}...`);
+        
+        const [addressInfo, tokens] = await Promise.allSettled([
+          this.callMcpTool('get_address_info', { address, chain_id: chain.id }),
+          this.callMcpTool('get_tokens_by_address', { address, chain_id: chain.id, page_size: 100 })
+        ]);
+
+        const chainInfo = {
+          addressInfo: addressInfo.status === 'fulfilled' ? addressInfo.value : null,
+          tokens: tokens.status === 'fulfilled' ? tokens.value : null
+        };
+
+        if (chainInfo.addressInfo || chainInfo.tokens) {
+          chainData[chain.name] = chainInfo;
+          chainCount++;
+          
+          if (chainInfo.tokens && chainInfo.tokens.data) {
+            totalTokens += chainInfo.tokens.data.length;
+          }
+        }
+
+        // Small delay to avoid overwhelming the server
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (error) {
+        this.logger.warn(`⚠️ Failed to analyze tokens for ${address} on ${chain.name}:`, error);
+      }
+    }
+
+    // Debug logging
+    this.logger.info('🔍 Chain data collected:', JSON.stringify(chainData, null, 2));
+    this.logger.info(`📊 Chain count: ${chainCount}, Total tokens: ${totalTokens}`);
+
+    // Simple format for testing
+    let formattedData = `\n=== TOKEN HOLDINGS ANALYSIS ===\n`;
+    formattedData += `Address: ${address}\n`;
+    formattedData += `Chains Analyzed: ${chainCount}\n`;
+    formattedData += `Total Tokens Found: ${totalTokens}\n\n`;
+
+    if (chainCount === 0) {
+      formattedData += `No data found on Ethereum Mainnet for this address.\n`;
+    } else {
+      for (const [chainName, chainInfo] of Object.entries(chainData)) {
+        formattedData += `\n--- ${chainName} ---\n`;
+        
+        const chainDataTyped = chainInfo as any;
+        
+        if (chainDataTyped.addressInfo?.data?.basic_info) {
+          const info = chainDataTyped.addressInfo.data.basic_info;
+          formattedData += `Native Balance: ${info.coin_balance} wei\n`;
+          formattedData += `Exchange Rate: ${info.exchange_rate || 'N/A'}\n`;
+        }
+        
+        if (chainDataTyped.tokens?.data?.length > 0) {
+          formattedData += `Tokens (${chainDataTyped.tokens.data.length}):\n`;
+          chainDataTyped.tokens.data.slice(0, 5).forEach((token: any) => {
+            formattedData += `  • ${token.symbol} (${token.name}): ${token.balance}\n`;
+          });
+          if (chainDataTyped.tokens.data.length > 5) {
+            formattedData += `  ... and ${chainDataTyped.tokens.data.length - 5} more tokens\n`;
+          }
+        } else {
+          formattedData += `No tokens found\n`;
+        }
+      }
+    }
+
+    const analysisPrompt = `${formattedData}
+
+ANALYSIS REQUIREMENTS:
+1. **TOKEN PORTFOLIO**: List all tokens held across all chains with balances
+2. **NATIVE CURRENCY**: ETH/POL balances on each chain  
+3. **TOKEN METADATA**: Name, symbol, decimals, contract addresses
+4. **MARKET DATA**: Exchange rates, market caps, volumes (if available)
+5. **PORTFOLIO VALUE**: Estimated USD value of holdings
+6. **TOKEN CATEGORIES**: DeFi tokens, stablecoins, governance tokens, etc.
+7. **CROSS-CHAIN DISTRIBUTION**: How tokens are distributed across chains
+8. **SIGNIFICANT HOLDINGS**: Highlight tokens with substantial balances
+
+Provide a comprehensive token analysis with specific balances, contract addresses, and market data from the blockchain data above.`;
+
+    const messages = [
+      new SystemMessage(`You are an expert token portfolio analyst. Analyze the provided token data comprehensively and provide detailed insights with specific balances and market information.`),
+      new HumanMessage(analysisPrompt)
+    ];
+
+    const result = await this.llm.invoke(messages);
+    return {
+      success: true,
+      data: result.content,
+      timestamp: new Date(),
+    };
   }
 
   async disconnect(): Promise<void> {
