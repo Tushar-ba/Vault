@@ -1,0 +1,20 @@
+{
+  "tokens": [
+    {
+      "address": "0x09572cED4772527f28c6Ea8E62B08C973fc47671",
+      "name": "Tesla Token",
+      "symbol": "TSLA",
+      "decimals": 18,
+      "isActive": true,
+      "description": "Tesla stock token for trading on the vault",
+      "addedAt": "2024-12-23T00:00:00.000Z"
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "lastUpdated": "2024-12-23T00:00:00.000Z",
+    "vaultAddress": "0xB6C58FDB4BBffeD7B7224634AB932518a29e4C4b",
+    "chainId": "11155111",
+    "chainName": "Sepolia Testnet"
+  }
+}

@@ -116,21 +116,61 @@ export class IntelligentBlockchainAgent {
 
       // If multi-chain request, automatically check all chains
       if (isMultiChainRequest && !chainId) {
-        this.logger.info('🌐 Multi-chain request detected, checking all chains automatically');
-        const allChains = ['1', '11155111', '84532', '10', '42161'];
+        this.logger.info('🌐 Multi-chain request detected, checking chains automatically');
         
-        for (const chain of allChains) {
+        // Extract which specific chains are mentioned, or use all chains
+        const requestedChains = this.extractRequestedChains(userMessage);
+        const chainsToCheck = requestedChains.length > 0 ? requestedChains : ['1', '11155111', '84532', '10', '42161'];
+        
+        this.logger.info(`📊 Checking ${chainsToCheck.length} chains: ${chainsToCheck.join(', ')}`);
+        
+        const address = this.extractAddressFromMessage(userMessage);
+        
+        // Detect what type of data the user wants
+        const wantsTokens = this.isTokenQuery(userMessage);
+        const wantsTransactions = this.isTransactionQuery(userMessage);
+        const wantsGasAnalysis = this.isGasQuery(userMessage);
+        
+        for (const chain of chainsToCheck) {
           try {
-            const result = await this.executeTool('get_address_info', {
-              address: this.extractAddressFromMessage(userMessage),
-              chain_id: chain
-            }, chain);
-            
-            toolCallsMade.push({
-              tool: 'get_address_info',
-              args: { address: this.extractAddressFromMessage(userMessage), chain_id: chain },
-              result: result
-            });
+            if (wantsTokens) {
+              // Get token holdings
+              const result = await this.executeTool('get_tokens_by_address', {
+                address: address,
+                chain_id: chain
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_tokens_by_address',
+                args: { address: address, chain_id: chain },
+                result: result
+              });
+            } else if (wantsTransactions || wantsGasAnalysis) {
+              // Get transactions
+              const result = await this.executeTool('get_transactions_by_address', {
+                address: address,
+                chain_id: chain,
+                page_size: 10
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_transactions_by_address',
+                args: { address: address, chain_id: chain, page_size: 10 },
+                result: result
+              });
+            } else {
+              // Default: get address info
+              const result = await this.executeTool('get_address_info', {
+                address: address,
+                chain_id: chain
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_address_info',
+                args: { address: address, chain_id: chain },
+                result: result
+              });
+            }
             
             this.logger.info(`✅ Checked chain ${chain}`);
           } catch (error) {
@@ -139,7 +179,7 @@ export class IntelligentBlockchainAgent {
         }
         
         // Generate summary from collected data
-        finalResponse = this.buildMultiChainActivitySummary(toolCallsMade);
+        finalResponse = this.buildSummaryFromToolCalls(toolCallsMade);
         
         return {
           success: true,
@@ -198,7 +238,7 @@ export class IntelligentBlockchainAgent {
           this.logger.error('LLM invocation error:', llmError);
           // Synthesize deterministic summary if we already have tool data
           if (toolCallsMade.length > 0) {
-            const synthesized = this.buildMultiChainActivitySummary(toolCallsMade);
+            const synthesized = this.buildSummaryFromToolCalls(toolCallsMade);
             content = `FINAL_ANSWER: ${synthesized}`;
           } else {
             // Force a minimal final answer if LLM fails and we have no data
@@ -635,9 +675,77 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     const lowerMessage = message.toLowerCase();
     const multiChainKeywords = [
       'across all chains', 'all chains', 'multiple chains', 'every chain',
-      'each chain', 'all networks', 'multi-chain', 'multichain'
+      'each chain', 'all networks', 'multi-chain', 'multichain',
+      'by chain', 'breakdown by chain', 'per chain',
+      'compare', 'vs', 'versus', 'which chain', 'most active'
     ];
-    return multiChainKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    // Check for explicit multi-chain keywords
+    if (multiChainKeywords.some(keyword => lowerMessage.includes(keyword))) {
+      return true;
+    }
+    
+    // Check if multiple specific chains are mentioned
+    // Note: Check longer names first to avoid false positives (e.g., "base sepolia" before "sepolia")
+    const chainMentions = [];
+    
+    if (lowerMessage.includes('base sepolia')) {
+      chainMentions.push('base sepolia');
+    } else if (lowerMessage.includes('base')) {
+      chainMentions.push('base');
+    }
+    
+    // Only check for standalone "sepolia" if "base sepolia" wasn't found
+    if (!chainMentions.includes('base sepolia') && lowerMessage.includes('sepolia')) {
+      chainMentions.push('sepolia');
+    }
+    
+    if (lowerMessage.includes('ethereum') || lowerMessage.includes('eth mainnet') || (lowerMessage.includes('mainnet') && !lowerMessage.includes('sepolia'))) {
+      chainMentions.push('ethereum');
+    }
+    
+    if (lowerMessage.includes('optimism') || lowerMessage.includes(' op ')) {
+      chainMentions.push('optimism');
+    }
+    
+    if (lowerMessage.includes('arbitrum') || lowerMessage.includes('arb')) {
+      chainMentions.push('arbitrum');
+    }
+    
+    // If 2 or more DISTINCT chains are mentioned, it's a multi-chain request
+    return chainMentions.length >= 2;
+  }
+
+  // Check if the user is asking about tokens
+  private isTokenQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const tokenKeywords = [
+      'token', 'tokens', 'holdings', 'hold', 'owns', 'erc20', 'erc-20',
+      'what tokens', 'which tokens', 'token holdings', 'token balance',
+      'portfolio', 'distribution', 'suspicious', 'safety', 'creators'
+    ];
+    return tokenKeywords.some(keyword => lowerMessage.includes(keyword));
+  }
+
+  // Check if the user is asking about transactions
+  private isTransactionQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const txKeywords = [
+      'transaction', 'transactions', 'tx', 'txs', 'transfer', 'transfers',
+      'activity', 'activities', 'history', 'recent', 'last',
+      'interactions', 'interact', 'defi', 'protocols', 'patterns',
+      'comprehensive report', 'risk profile', 'assess'
+    ];
+    return txKeywords.some(keyword => lowerMessage.includes(keyword));
+  }
+
+  // Check if the user is asking about gas
+  private isGasQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const gasKeywords = [
+      'gas', 'fee', 'fees', 'cost', 'spend', 'spent', 'efficiency', 'breakdown'
+    ];
+    return gasKeywords.some(keyword => lowerMessage.includes(keyword));
   }
 
   // Check if the user message is requesting contract analysis
@@ -658,6 +766,38 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     return addressMatch ? addressMatch[0] : '';
   }
 
+  // Extract which specific chains are mentioned in the message
+  private extractRequestedChains(message: string): string[] {
+    const lowerMessage = message.toLowerCase();
+    const chains: string[] = [];
+    
+    // Check for specific chains (longer names first to avoid false positives)
+    if (lowerMessage.includes('base sepolia')) {
+      chains.push('84532');
+    } else if (lowerMessage.includes('base')) {
+      chains.push('84532');
+    }
+    
+    // Only check for standalone "sepolia" if "base sepolia" wasn't found
+    if (!chains.includes('84532') && lowerMessage.includes('sepolia')) {
+      chains.push('11155111');
+    }
+    
+    if (lowerMessage.includes('ethereum') || lowerMessage.includes('eth mainnet') || (lowerMessage.includes('mainnet') && !lowerMessage.includes('sepolia'))) {
+      if (!chains.includes('1')) chains.push('1');
+    }
+    
+    if (lowerMessage.includes('optimism') || lowerMessage.includes(' op ')) {
+      if (!chains.includes('10')) chains.push('10');
+    }
+    
+    if (lowerMessage.includes('arbitrum') || lowerMessage.includes('arb')) {
+      if (!chains.includes('42161')) chains.push('42161');
+    }
+    
+    return chains;
+  }
+
   // Build a human-readable multi-chain activity summary from tool results
   private buildMultiChainActivitySummary(toolCallsMade: any[]): string {
     const chainNames: Record<string, string> = {
@@ -668,6 +808,13 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
       '42161': 'Arbitrum One'
     };
 
+    // Check if we have transaction data (for gas analysis)
+    const transactionCalls = toolCallsMade.filter(call => call.tool === 'get_transactions_by_address');
+    if (transactionCalls.length > 0) {
+      return this.buildGasAnalysisSummary(transactionCalls, chainNames);
+    }
+
+    // Otherwise, build address info summary
     const lines: string[] = [];
     for (const call of toolCallsMade) {
       if (call.tool !== 'get_address_info') continue;
@@ -698,6 +845,185 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     }
 
     return `Multi-chain activity summary for the address:\n${lines.join('\n')}`;
+  }
+
+  private buildGasAnalysisSummary(transactionCalls: any[], chainNames: Record<string, string>): string {
+    const lines: string[] = [];
+    let totalGasWei = BigInt(0);
+    let totalTransactions = 0;
+
+    for (const call of transactionCalls) {
+      const chainId = String(call.args?.chain_id ?? 'unknown');
+      const name = chainNames[chainId] || `Chain ${chainId}`;
+      const transactions = call.result?.data || [];
+      
+      if (!Array.isArray(transactions) || transactions.length === 0) {
+        lines.push(`\n**${name}:**\n- No transactions found`);
+        continue;
+      }
+
+      let chainGasWei = BigInt(0);
+      const txCount = transactions.length;
+      totalTransactions += txCount;
+
+      for (const tx of transactions) {
+        if (tx.fee) {
+          try {
+            chainGasWei += BigInt(tx.fee);
+          } catch (e) {
+            // Skip invalid fee values
+          }
+        }
+      }
+
+      totalGasWei += chainGasWei;
+
+      // Convert wei to ETH
+      const chainGasEth = this.weiToEth(chainGasWei.toString());
+      
+      lines.push(`\n**${name}:**`);
+      lines.push(`- Transactions: ${txCount}`);
+      lines.push(`- Total Gas Spent: ${chainGasEth} ETH`);
+      
+      // Show recent transactions
+      const recentTxs = transactions.slice(0, 3);
+      lines.push(`- Recent Transactions:`);
+      for (const tx of recentTxs) {
+        const gasEth = this.weiToEth(tx.fee || '0');
+        const timestamp = tx.timestamp ? new Date(tx.timestamp).toLocaleDateString() : 'Unknown';
+        lines.push(`  • ${tx.hash?.substring(0, 10)}... - Gas: ${gasEth} ETH (${timestamp})`);
+      }
+    }
+
+    const totalGasEth = this.weiToEth(totalGasWei.toString());
+    
+    const summary = [
+      `**📊 Multi-Chain Gas Analysis:**\n`,
+      `**Total Gas Spent Across All Chains:** ${totalGasEth} ETH`,
+      `**Total Transactions Analyzed:** ${totalTransactions}\n`,
+      ...lines
+    ];
+
+    return summary.join('\n');
+  }
+
+  private weiToEth(weiString: string): string {
+    try {
+      const len = weiString.length;
+      if (len === 0 || weiString === '0') return '0';
+      const whole = len > 18 ? weiString.slice(0, len - 18) : '0';
+      const frac = weiString.padStart(19, '0').slice(-18).slice(0, 6).replace(/0+$/, '') || '0';
+      return frac === '0' ? whole : `${whole}.${frac}`;
+    } catch {
+      return '0';
+    }
+  }
+
+  private buildSummaryFromToolCalls(toolCallsMade: any[]): string {
+    // Check what types of tool calls we have
+    const hasTransactions = toolCallsMade.some(call => call.tool === 'get_transactions_by_address');
+    const hasAddressInfo = toolCallsMade.some(call => call.tool === 'get_address_info');
+    const hasTokenInfo = toolCallsMade.some(call => call.tool === 'get_tokens_by_address');
+
+    // Build appropriate summary based on data type
+    if (hasTransactions) {
+      const chainNames: Record<string, string> = {
+        '1': 'Ethereum Mainnet',
+        '11155111': 'Sepolia Testnet',
+        '84532': 'Base Sepolia',
+        '10': 'Optimism',
+        '42161': 'Arbitrum One'
+      };
+      const transactionCalls = toolCallsMade.filter(call => call.tool === 'get_transactions_by_address');
+      return this.buildGasAnalysisSummary(transactionCalls, chainNames);
+    } else if (hasAddressInfo) {
+      return this.buildMultiChainActivitySummary(toolCallsMade);
+    } else if (hasTokenInfo) {
+      return this.buildTokenHoldingsSummary(toolCallsMade);
+    } else {
+      // Generic fallback
+      return `Analysis complete. Found ${toolCallsMade.length} data points. Check the detailed tool calls for more information.`;
+    }
+  }
+
+  private buildTokenHoldingsSummary(toolCallsMade: any[]): string {
+    const chainNames: Record<string, string> = {
+      '1': 'Ethereum Mainnet',
+      '11155111': 'Sepolia Testnet',
+      '84532': 'Base Sepolia',
+      '10': 'Optimism',
+      '42161': 'Arbitrum One'
+    };
+
+    const lines: string[] = ['**🪙 Token Holdings Across Chains:**\n'];
+    let totalTokensAcrossChains = 0;
+    let chainsWithTokens = 0;
+    
+    for (const call of toolCallsMade) {
+      if (call.tool !== 'get_tokens_by_address') continue;
+      const chainId = String(call.args?.chain_id ?? 'unknown');
+      const chainName = chainNames[chainId] || `Chain ${chainId}`;
+      const tokens = call.result?.data || [];
+      
+      if (!Array.isArray(tokens) || tokens.length === 0) {
+        lines.push(`\n**${chainName}:**`);
+        lines.push(`- No tokens found`);
+        continue;
+      }
+
+      totalTokensAcrossChains += tokens.length;
+      chainsWithTokens++;
+
+      lines.push(`\n**${chainName}:**`);
+      lines.push(`- Total Tokens: ${tokens.length}`);
+      
+      const topTokens = tokens.slice(0, 10);
+      for (const token of topTokens) {
+        // Blockscout returns data directly in token object, not nested
+        const symbol = token.symbol || 'Unknown';
+        const tokenName = token.name || 'Unknown Token';
+        const tokenType = token.type || 'ERC-20';
+        const value = token.balance || token.value || '0';
+        const decimals = parseInt(token.decimals || '18');
+        const tokenAddress = token.address || 'Unknown';
+        
+        // Format value with decimals
+        let formattedValue = value;
+        try {
+          if (value && value !== '0' && decimals) {
+            const valueLen = value.length;
+            if (valueLen > decimals) {
+              const whole = value.slice(0, valueLen - decimals);
+              const frac = value.slice(valueLen - decimals, valueLen - decimals + 4);
+              formattedValue = `${whole}.${frac}`;
+            } else {
+              formattedValue = `0.${value.padStart(decimals, '0').slice(0, 4)}`;
+            }
+          }
+        } catch (e) {
+          // Keep original value if formatting fails
+        }
+        
+        lines.push(`  • **${symbol}** (${tokenName})`);
+        lines.push(`    Balance: ${formattedValue}`);
+        lines.push(`    Type: ${tokenType}`);
+        lines.push(`    Contract: ${tokenAddress.substring(0, 10)}...`);
+      }
+      
+      if (tokens.length > 10) {
+        lines.push(`  ... and ${tokens.length - 10} more tokens`);
+      }
+    }
+
+    // Add summary at the top
+    const summary = [
+      `**📊 Summary:**`,
+      `- Total Unique Tokens: ${totalTokensAcrossChains}`,
+      `- Chains with Tokens: ${chainsWithTokens}/5`,
+      ``
+    ];
+
+    return [...summary, ...lines].join('\n');
   }
 
   // Build a comprehensive contract analysis from multiple tool results
