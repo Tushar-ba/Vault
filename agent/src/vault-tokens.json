@@ -8,6 +8,24 @@
       "isActive": true,
       "description": "Tesla stock token for trading on the vault",
       "addedAt": "2024-12-23T00:00:00.000Z"
+    },
+     {
+      "address": "0xC411824F1695feeC0f9b8C3d4810c2FD1AB1000a",
+      "name": "Google Token",
+      "symbol": "GOOGL",
+      "decimals": 18,
+      "isActive": true,
+      "description": "Google stock token for trading on the vault",
+      "addedAt": "2024-12-23T00:00:00.000Z"
+    },
+     {
+      "address": "0x98e565A1d46d4018E46052C936322479431CA883",
+      "name": "Microsoft Token",
+      "symbol": "MSFT",
+      "decimals": 18,
+      "isActive": true,
+      "description": "Microsoft stock token for trading on the vault",
+      "addedAt": "2024-12-23T00:00:00.000Z"
     }
   ],
   "metadata": {

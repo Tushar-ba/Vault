@@ -3,6 +3,8 @@ import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages
 import { config } from './config/index.js';
 import { Logger } from './utils/logger.js';
 import { ethers } from 'ethers';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 // Tool definitions for the vault trading
 interface VaultTool {
@@ -15,16 +17,38 @@ interface VaultTool {
   };
 }
 
+// Token interface from vault-tokens.json
+interface VaultToken {
+  address: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+  isActive: boolean;
+  description: string;
+  addedAt: string;
+}
+
+interface TokensConfig {
+  tokens: VaultToken[];
+  metadata: {
+    version: string;
+    lastUpdated: string;
+    vaultAddress: string;
+    chainId: string;
+    chainName: string;
+  };
+}
+
 export class VaultAIAgent {
   private llm: ChatGoogleGenerativeAI;
   private logger: Logger;
   private provider: ethers.JsonRpcProvider;
   private vaultContract: ethers.Contract;
   private conversationHistory: any[] = [];
+  private availableTokens: VaultToken[] = [];
   
   // Contract addresses and configuration
   private readonly VAULT_ADDRESS = '0xB6C58FDB4BBffeD7B7224634AB932518a29e4C4b';
-  private readonly TESLA_TOKEN = '0x09572cED4772527f28c6Ea8E62B08C973fc47671';
   private readonly PYUSD_ADDRESS = '0xCaC524BcA292aaade2DF8A05cC58F0a65B1B3bB9';
   private readonly RPC_URL = 'https://0xrpc.io/sep';
   private readonly CHAIN_ID = 11155111;
@@ -41,13 +65,13 @@ export class VaultAIAgent {
   private tools: VaultTool[] = [
     {
       name: 'get_token_price',
-      description: 'Get the current price of a token from the vault contract',
+      description: 'Get the current price of a token from the vault contract. Supports Tesla (TSLA), Google (GOOGL), and Microsoft (MSFT) tokens.',
       parameters: {
         type: 'object',
         properties: {
           token_address: {
             type: 'string',
-            description: 'The token contract address (e.g., Tesla token address)'
+            description: 'The token contract address or name/symbol (e.g., "Tesla", "TSLA", "Google", "GOOGL", "Microsoft", "MSFT", or the full address)'
           }
         },
         required: ['token_address']
@@ -55,13 +79,13 @@ export class VaultAIAgent {
     },
     {
       name: 'get_stock_info',
-      description: 'Get detailed information about a stock token from the vault',
+      description: 'Get detailed information about a stock token from the vault. Supports Tesla, Google, and Microsoft tokens.',
       parameters: {
         type: 'object',
         properties: {
           token_address: {
             type: 'string',
-            description: 'The token contract address'
+            description: 'The token contract address or name/symbol (e.g., "Tesla", "Google", "Microsoft", or their symbols)'
           }
         },
         required: ['token_address']
@@ -69,13 +93,13 @@ export class VaultAIAgent {
     },
     {
       name: 'calculate_buy_cost',
-      description: 'Calculate the cost to buy a specific amount of tokens',
+      description: 'Calculate the cost to buy a specific amount of tokens (Tesla, Google, or Microsoft)',
       parameters: {
         type: 'object',
         properties: {
           token_address: {
             type: 'string',
-            description: 'The token contract address'
+            description: 'The token contract address or name/symbol (e.g., "Tesla", "Google", "Microsoft")'
           },
           amount: {
             type: 'number',
@@ -87,13 +111,13 @@ export class VaultAIAgent {
     },
     {
       name: 'calculate_sell_return',
-      description: 'Calculate how much PYUSD you will receive for selling tokens',
+      description: 'Calculate how much PYUSD you will receive for selling tokens (Tesla, Google, or Microsoft)',
       parameters: {
         type: 'object',
         properties: {
           token_address: {
             type: 'string',
-            description: 'The token contract address'
+            description: 'The token contract address or name/symbol (e.g., "Tesla", "Google", "Microsoft")'
           },
           amount: {
             type: 'number',
@@ -145,13 +169,13 @@ export class VaultAIAgent {
     },
     {
       name: 'prepare_buy_transaction',
-      description: 'Prepare a buy transaction for the user to sign with MetaMask. Returns transaction details including PYUSD allowance requirements.',
+      description: 'Prepare a buy transaction for the user to sign with MetaMask. Supports Tesla, Google, and Microsoft tokens. Returns transaction details including PYUSD allowance requirements.',
       parameters: {
         type: 'object',
         properties: {
           token_address: {
             type: 'string',
-            description: 'The token contract address'
+            description: 'The token contract address or name/symbol (e.g., "Tesla", "Google", "Microsoft")'
           },
           amount: {
             type: 'number',
@@ -163,13 +187,13 @@ export class VaultAIAgent {
     },
     {
       name: 'prepare_sell_transaction',
-      description: 'Prepare a sell transaction for the user to sign with MetaMask. Returns transaction details including token allowance requirements.',
+      description: 'Prepare a sell transaction for the user to sign with MetaMask. Supports Tesla, Google, and Microsoft tokens. Returns transaction details including token allowance requirements.',
       parameters: {
         type: 'object',
         properties: {
           token_address: {
             type: 'string',
-            description: 'The token contract address'
+            description: 'The token contract address or name/symbol (e.g., "Tesla", "Google", "Microsoft")'
           },
           amount: {
             type: 'number',
@@ -188,6 +212,9 @@ export class VaultAIAgent {
       throw new Error('GEMINI_API_KEY is required');
     }
 
+    // Load available tokens from vault-tokens.json
+    this.loadAvailableTokens();
+
     // Initialize Gemini LLM
     this.llm = new ChatGoogleGenerativeAI({
       apiKey: config.geminiApiKey,
@@ -203,6 +230,69 @@ export class VaultAIAgent {
     this.logger.info('🤖 VaultAIAgent initialized');
     this.logger.info(`📊 Vault: ${this.VAULT_ADDRESS}`);
     this.logger.info(`⛓️ Chain: Sepolia (${this.CHAIN_ID})`);
+    this.logger.info(`🪙 Available tokens: ${this.availableTokens.map(t => `${t.symbol} (${t.name})`).join(', ')}`);
+  }
+
+  /**
+   * Load available tokens from vault-tokens.json
+   */
+  private loadAvailableTokens(): void {
+    try {
+      const tokensFilePath = join(process.cwd(), 'src', 'vault-tokens.json');
+      const tokensData = readFileSync(tokensFilePath, 'utf-8');
+      const tokensConfig: TokensConfig = JSON.parse(tokensData);
+      
+      this.availableTokens = tokensConfig.tokens.filter(token => token.isActive);
+      this.logger.info(`Loaded ${this.availableTokens.length} active tokens from vault-tokens.json`);
+    } catch (error) {
+      this.logger.error('Failed to load tokens from vault-tokens.json:', error);
+      // Fallback to Tesla token only
+      this.availableTokens = [{
+        address: '0x09572cED4772527f28c6Ea8E62B08C973fc47671',
+        name: 'Tesla Token',
+        symbol: 'TSLA',
+        decimals: 18,
+        isActive: true,
+        description: 'Tesla stock token for trading on the vault',
+        addedAt: '2024-12-23T00:00:00.000Z'
+      }];
+    }
+  }
+
+  /**
+   * Resolve token name/symbol to address
+   */
+  private resolveTokenAddress(tokenIdentifier: string): string | null {
+    const identifier = tokenIdentifier.toLowerCase().trim();
+    
+    // Try to find by address first (exact match)
+    const byAddress = this.availableTokens.find(token => 
+      token.address.toLowerCase() === identifier
+    );
+    if (byAddress) return byAddress.address;
+
+    // Try to find by symbol
+    const bySymbol = this.availableTokens.find(token => 
+      token.symbol.toLowerCase() === identifier
+    );
+    if (bySymbol) return bySymbol.address;
+
+    // Try to find by name (partial match)
+    const byName = this.availableTokens.find(token => 
+      token.name.toLowerCase().includes(identifier) || identifier.includes(token.name.toLowerCase())
+    );
+    if (byName) return byName.address;
+
+    return null;
+  }
+
+  /**
+   * Get token info by address
+   */
+  private getTokenByAddress(address: string): VaultToken | null {
+    return this.availableTokens.find(token => 
+      token.address.toLowerCase() === address.toLowerCase()
+    ) || null;
   }
 
   /**
@@ -371,13 +461,19 @@ export class VaultAIAgent {
       `- ${tool.name}: ${tool.description}\n  Parameters: ${JSON.stringify(tool.parameters.properties)}`
     ).join('\n\n');
 
+    const tokensList = this.availableTokens.map(token => 
+      `- ${token.name} (${token.symbol}): ${token.address}`
+    ).join('\n');
+
     return `You are a specialized AI agent for the Vault Trading System on Sepolia testnet.
 
 **VAULT INFORMATION:**
 - Vault Address: ${this.VAULT_ADDRESS}
-- Tesla Token: ${this.TESLA_TOKEN}
 - PYUSD Address: ${this.PYUSD_ADDRESS}
 - Chain: Sepolia (${this.CHAIN_ID})
+
+**AVAILABLE TOKENS:**
+${tokensList}
 
 **AVAILABLE TOOLS:**
 ${toolDescriptions}
@@ -432,7 +528,7 @@ FINAL_ANSWER: Your detailed response here
 User: "What's the current price of Tesla token?"
 Assistant:
 TOOL_CALL: get_token_price
-ARGS: {"token_address": "${this.TESLA_TOKEN}"}
+ARGS: {"token_address": "0x09572cED4772527f28c6Ea8E62B08C973fc47671"}
 END_TOOL_CALL
 
 [After receiving result]
@@ -441,7 +537,7 @@ FINAL_ANSWER: The current Tesla token price is $1.0 PYUSD per token.
 User: "How much will it cost to buy 5 Tesla tokens?"
 Assistant:
 TOOL_CALL: calculate_buy_cost
-ARGS: {"token_address": "${this.TESLA_TOKEN}", "amount": 5}
+ARGS: {"token_address": "0x09572cED4772527f28c6Ea8E62B08C973fc47671", "amount": 5}
 END_TOOL_CALL
 
 [After receiving result]
@@ -459,7 +555,7 @@ FINAL_ANSWER: [Comprehensive contract analysis based on MCP server data]
 User: "Buy 5 Tesla tokens"
 Assistant:
 TOOL_CALL: prepare_buy_transaction
-ARGS: {"token_address": "${this.TESLA_TOKEN}", "amount": 5}
+ARGS: {"token_address": "0x09572cED4772527f28c6Ea8E62B08C973fc47671", "amount": 5}
 END_TOOL_CALL
 
 [After receiving result]
@@ -472,7 +568,7 @@ Connect MetaMask to proceed with the transaction.
 User: "Sell 3 Tesla tokens"
 Assistant:
 TOOL_CALL: prepare_sell_transaction
-ARGS: {"token_address": "${this.TESLA_TOKEN}", "amount": 3}
+ARGS: {"token_address": "0x09572cED4772527f28c6Ea8E62B08C973fc47671", "amount": 3}
 END_TOOL_CALL
 
 [After receiving result]
@@ -509,6 +605,23 @@ END_TOOL_CALL
 
 [Call for each chain, then sum gas fees]
 FINAL_ANSWER: Total gas spend across all chains: [calculated total]
+
+User: "Buy 10 Google tokens"
+Assistant:
+TOOL_CALL: prepare_buy_transaction
+ARGS: {"token_address": "0xC411824F1695feeC0f9b8C3d4810c2FD1AB1000a", "amount": 10}
+END_TOOL_CALL
+
+User: "Get Microsoft price"
+Assistant:
+TOOL_CALL: get_token_price
+ARGS: {"token_address": "0x98e565A1d46d4018E46052C936322479431CA883"}
+END_TOOL_CALL
+
+**TOKEN NAME RESOLUTION:**
+- Users can refer to tokens by name (e.g., "Tesla", "Google", "Microsoft") or symbol (e.g., "TSLA", "GOOGL", "MSFT")
+- Always resolve user input to the correct token address before making tool calls
+- Support partial name matching (e.g., "tesla" matches "Tesla Token")
 
 START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first.`;
   }
@@ -587,14 +700,20 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
   /**
    * Tool: Get token price
    */
-  private async getTokenPrice(tokenAddress: string): Promise<any> {
+  private async getTokenPrice(tokenIdentifier: string): Promise<any> {
     try {
+      // Resolve token name/symbol to address
+      const tokenAddress = this.resolveTokenAddress(tokenIdentifier) || tokenIdentifier;
+      const tokenInfo = this.getTokenByAddress(tokenAddress);
+      
       const price = await this.vaultContract.getPrice(tokenAddress);
       const priceInPYUSD = ethers.formatUnits(price, 6);
       
       return {
         success: true,
         tokenAddress,
+        tokenName: tokenInfo?.name || 'Unknown Token',
+        tokenSymbol: tokenInfo?.symbol || 'UNKNOWN',
         price: priceInPYUSD,
         priceWei: price.toString(),
         currency: 'PYUSD'
@@ -610,13 +729,20 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
   /**
    * Tool: Get stock info
    */
-  private async getStockInfo(tokenAddress: string): Promise<any> {
+  private async getStockInfo(tokenIdentifier: string): Promise<any> {
     try {
+      // Resolve token name/symbol to address
+      const tokenAddress = this.resolveTokenAddress(tokenIdentifier) || tokenIdentifier;
+      const tokenInfo = this.getTokenByAddress(tokenAddress);
+      
       const stockInfo = await this.vaultContract.stockList(tokenAddress);
       const price = await this.vaultContract.getPrice(tokenAddress);
       
       return {
         success: true,
+        tokenAddress,
+        tokenName: tokenInfo?.name || stockInfo.name,
+        tokenSymbol: tokenInfo?.symbol || 'UNKNOWN',
         name: stockInfo.name,
         pricingFactor: stockInfo.pricingFactor.toString(),
         currentSupply: ethers.formatEther(stockInfo.currentSupply),
@@ -634,14 +760,21 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
   /**
    * Tool: Calculate buy cost
    */
-  private async calculateBuyCost(tokenAddress: string, amount: number): Promise<any> {
+  private async calculateBuyCost(tokenIdentifier: string, amount: number): Promise<any> {
     try {
+      // Resolve token name/symbol to address
+      const tokenAddress = this.resolveTokenAddress(tokenIdentifier) || tokenIdentifier;
+      const tokenInfo = this.getTokenByAddress(tokenAddress);
+      
       const price = await this.vaultContract.getPrice(tokenAddress);
       const priceInPYUSD = ethers.formatUnits(price, 6);
       const totalCost = (parseFloat(priceInPYUSD) * amount).toFixed(6);
       
       return {
         success: true,
+        tokenAddress,
+        tokenName: tokenInfo?.name || 'Unknown Token',
+        tokenSymbol: tokenInfo?.symbol || 'UNKNOWN',
         amount,
         pricePerToken: priceInPYUSD,
         totalCost,
@@ -658,14 +791,21 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
   /**
    * Tool: Calculate sell return
    */
-  private async calculateSellReturn(tokenAddress: string, amount: number): Promise<any> {
+  private async calculateSellReturn(tokenIdentifier: string, amount: number): Promise<any> {
     try {
+      // Resolve token name/symbol to address
+      const tokenAddress = this.resolveTokenAddress(tokenIdentifier) || tokenIdentifier;
+      const tokenInfo = this.getTokenByAddress(tokenAddress);
+      
       const price = await this.vaultContract.getPrice(tokenAddress);
       const priceInPYUSD = ethers.formatUnits(price, 6);
       const totalReturn = (parseFloat(priceInPYUSD) * amount).toFixed(6);
       
       return {
         success: true,
+        tokenAddress,
+        tokenName: tokenInfo?.name || 'Unknown Token',
+        tokenSymbol: tokenInfo?.symbol || 'UNKNOWN',
         amount,
         pricePerToken: priceInPYUSD,
         totalReturn,
@@ -735,17 +875,26 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
   /**
    * Tool: Prepare buy transaction
    */
-  private async prepareBuyTransaction(tokenAddress: string, amount: number): Promise<any> {
+  private async prepareBuyTransaction(tokenIdentifier: string, amount: number): Promise<any> {
     try {
+      // Resolve token name/symbol to address
+      const tokenAddress = this.resolveTokenAddress(tokenIdentifier) || tokenIdentifier;
+      const tokenInfo = this.getTokenByAddress(tokenAddress);
+      
       const price = await this.vaultContract.getPrice(tokenAddress);
       const priceInPYUSD = ethers.formatUnits(price, 6);
       const totalCost = (parseFloat(priceInPYUSD) * amount).toFixed(6);
       const totalCostWei = ethers.parseUnits(totalCost, 6);
       
+      const tokenName = tokenInfo?.name || 'Unknown Token';
+      const tokenSymbol = tokenInfo?.symbol || 'UNKNOWN';
+      
       return {
         success: true,
         operation: 'buy',
         tokenAddress,
+        tokenName,
+        tokenSymbol,
         amount,
         pricePerToken: priceInPYUSD,
         totalCost,
@@ -763,7 +912,7 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
           {
             step: 2,
             action: 'buy_stock',
-            description: `Buy ${amount} tokens`,
+            description: `Buy ${amount} ${tokenSymbol} tokens`,
             contract: this.VAULT_ADDRESS,
             function: 'buyStock',
             params: {
@@ -773,7 +922,7 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
           }
         ],
         requiresMetaMask: true,
-        message: `To buy ${amount} tokens:\n1. Approve ${totalCost} PYUSD\n2. Execute buy transaction\n\nConnect MetaMask to proceed.`
+        message: `To buy ${amount} ${tokenSymbol} tokens:\n1. Approve ${totalCost} PYUSD\n2. Execute buy transaction\n\nConnect MetaMask to proceed.`
       };
     } catch (error) {
       return {
@@ -786,17 +935,26 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
   /**
    * Tool: Prepare sell transaction
    */
-  private async prepareSellTransaction(tokenAddress: string, amount: number): Promise<any> {
+  private async prepareSellTransaction(tokenIdentifier: string, amount: number): Promise<any> {
     try {
+      // Resolve token name/symbol to address
+      const tokenAddress = this.resolveTokenAddress(tokenIdentifier) || tokenIdentifier;
+      const tokenInfo = this.getTokenByAddress(tokenAddress);
+      
       const price = await this.vaultContract.getPrice(tokenAddress);
       const priceInPYUSD = ethers.formatUnits(price, 6);
       const totalReturn = (parseFloat(priceInPYUSD) * amount).toFixed(6);
       const amountWei = ethers.parseEther(amount.toString());
       
+      const tokenName = tokenInfo?.name || 'Unknown Token';
+      const tokenSymbol = tokenInfo?.symbol || 'UNKNOWN';
+      
       return {
         success: true,
         operation: 'sell',
         tokenAddress,
+        tokenName,
+        tokenSymbol,
         amount,
         pricePerToken: priceInPYUSD,
         totalReturn,
@@ -805,7 +963,7 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
           {
             step: 1,
             action: 'approve_token',
-            description: `Approve ${amount} tokens for the vault contract`,
+            description: `Approve ${amount} ${tokenSymbol} tokens for the vault contract`,
             contract: tokenAddress,
             spender: this.VAULT_ADDRESS,
             amount: amountWei.toString()
@@ -813,7 +971,7 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
           {
             step: 2,
             action: 'sell_stock',
-            description: `Sell ${amount} tokens`,
+            description: `Sell ${amount} ${tokenSymbol} tokens`,
             contract: this.VAULT_ADDRESS,
             function: 'sellStock',
             params: {
@@ -823,7 +981,7 @@ START WITH A TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do first
           }
         ],
         requiresMetaMask: true,
-        message: `To sell ${amount} tokens:\n1. Approve ${amount} tokens\n2. Execute sell transaction\n3. Receive ${totalReturn} PYUSD\n\nConnect MetaMask to proceed.`
+        message: `To sell ${amount} ${tokenSymbol} tokens:\n1. Approve ${amount} ${tokenSymbol} tokens\n2. Execute sell transaction\n3. Receive ${totalReturn} PYUSD\n\nConnect MetaMask to proceed.`
       };
     } catch (error) {
       return {

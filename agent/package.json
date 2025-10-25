@@ -31,6 +31,7 @@
     "test:watch": "jest --watch",
     "test:features": "node test-features.js",
     "test:vault": "node test-vault-agent.js",
+    "test:tokens": "node test-token-resolution.js",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },
