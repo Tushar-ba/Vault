@@ -1,0 +1,50 @@
+Here is a clean list of all the prompts you provided, formatted as requested.
+💬 Multichain Analysis Prompts
+1. Cross-Chain Address Activity Analysis
+"message": "Show me the activity of 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across all chains"
+"message": "Compare the token holdings of 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Ethereum vs Sepolia vs Optimism"
+"message": "Which chain has the most transaction activity for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55?"
+
+2. Multi-Chain Gas Analysis
+"message": "Calculate my total gas spend across all chains for the last 10 transactions for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55"
+"message": "Compare gas efficiency between Ethereum and Optimism for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55"
+"message": "Show me gas spend breakdown by chain for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55"
+
+3. Cross-Chain Token Analysis
+"message": "What tokens does 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 hold across all chains?"
+"message": "Does 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 hold any tokens on Base Sepolia?"
+"message": "Show me token transfer activity for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across all chains"
+
+4. Multi-Chain Transaction Patterns
+"message": "Analyze transaction patterns for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across all chains - which chain is most active?"
+"message": "Show me contract interactions for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across Ethereum, Optimism, and Arbitrum"
+"message": "What DeFi protocols has 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 interacted with across all chains?"
+
+5. Chain-Specific Analysis with Comparison
+"message": "Compare the activity of 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Ethereum mainnet vs Sepolia testnet"
+"message": "Compare activity on Optimism vs Arbitrum for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55"
+"message": "How does Base Sepolia activity compare to other chains for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55?"
+
+6. Advanced Multi-Chain Queries
+"message": "Generate a comprehensive report for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 including: balance, tokens, transaction count, and gas spend across all chains"
+"message": "Assess the risk profile of 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across all chains - which chain shows suspicious activity?"
+"message": "Show me the portfolio distribution of 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across all chains"
+
+7. Specific Chain Analysis
+"message": "Analyze 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Ethereum mainnet"
+"message": "Show me all activity for 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Sepolia"
+"message": "What's happening with 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Optimism?"
+"message": "Analyze 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Arbitrum"
+"message": "Check 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 on Base Sepolia"
+
+8. Multi-Chain Token Safety Analysis
+"message": "Check if any tokens held by 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 are suspicious across all chains"
+"message": "Analyze the creators of tokens held by 0x49f51e3C94B459677c3B1e611DB3E44d4E6b1D55 across all chains"
+
+9. Real-World Test Addresses
+"message": "Show me vitalik.eth (0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045) activity across all chains"
+"message": "Analyze USDC contract (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48) across all chains"
+
+10. Additional Test Prompt
+"message": "Analyze this contract (0xB6C58FDB4BBffeD7B7224634AB932518a29e4C4b) on sepolia testnet "
+

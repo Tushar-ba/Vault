@@ -7,14 +7,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "nodemon --exec tsx src/intelligent-chatbot-server.ts",
-    "dev:old": "nodemon --exec tsx src/chatbot-server.ts",
+    "dev:ai": "nodemon --exec tsx src/vault-ai-server.ts",
     "start": "node dist/intelligent-chatbot-server.js",
-    "start:old": "node dist/chatbot-server.js",
-    "chatbot": "tsc && node dist/intelligent-chatbot-server.js",
-    "chatbot:old": "tsc && node dist/chatbot-server.js",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:features": "node test-features.js",
+    "start:ai": "node dist/vault-ai-server.js",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },
@@ -32,13 +27,17 @@
   "dependencies": {
     "@langchain/core": "^0.3.17",
     "@langchain/google-genai": "^0.1.0",
+    "@langchain/langgraph": "^0.2.16",
     "@modelcontextprotocol/sdk": "^0.4.0",
+    "@types/socket.io": "^3.0.1",
     "axios": "^1.12.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "ethers": "^6.15.0",
     "eventsource": "^4.0.0",
     "express": "^4.18.2",
-    "helmet": "^7.1.0"
+    "helmet": "^7.1.0",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
     "@types/compression": "^1.7.5",

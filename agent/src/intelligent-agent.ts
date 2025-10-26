@@ -3,6 +3,7 @@ import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages
 import { config } from './config/index.js';
 import { Logger } from './utils/logger.js';
 import { DockerMCPClient } from './docker-mcp-client.js';
+import { AnalysisResponseGenerator } from './analysis/response-generator.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -23,6 +24,7 @@ export class IntelligentBlockchainAgent {
   private mcpClient: DockerMCPClient | null = null;
   private llm: ChatGoogleGenerativeAI;
   private logger: Logger;
+  private responseGenerator: AnalysisResponseGenerator;
   public isInitialized: boolean = false;
   public availableTools: any[] = [];
   private mcpConfig: any;
@@ -31,6 +33,7 @@ export class IntelligentBlockchainAgent {
 
   constructor() {
     this.logger = new Logger('IntelligentAgent');
+    this.responseGenerator = new AnalysisResponseGenerator();
     
     if (!config.geminiApiKey) {
       throw new Error('GEMINI_API_KEY is required');
@@ -116,21 +119,88 @@ export class IntelligentBlockchainAgent {
 
       // If multi-chain request, automatically check all chains
       if (isMultiChainRequest && !chainId) {
-        this.logger.info('🌐 Multi-chain request detected, checking all chains automatically');
-        const allChains = ['1', '11155111', '84532', '10', '42161'];
+        this.logger.info('🌐 Multi-chain request detected, checking chains automatically');
         
-        for (const chain of allChains) {
+        // Extract which specific chains are mentioned, or use all chains
+        const requestedChains = this.extractRequestedChains(userMessage);
+        const chainsToCheck = requestedChains.length > 0 ? requestedChains : ['1', '11155111', '84532', '10', '42161'];
+        
+        this.logger.info(`📊 Checking ${chainsToCheck.length} chains: ${chainsToCheck.join(', ')}`);
+        
+        const address = this.extractAddressFromMessage(userMessage);
+        
+        // Detect what type of data the user wants
+        const wantsTokens = this.isTokenQuery(userMessage);
+        const wantsTransactions = this.isTransactionQuery(userMessage);
+        const wantsGasAnalysis = this.isGasQuery(userMessage);
+        const wantsContractAnalysis = this.isContractAnalysisRequest(userMessage);
+        
+        for (const chain of chainsToCheck) {
           try {
-            const result = await this.executeTool('get_address_info', {
-              address: this.extractAddressFromMessage(userMessage),
-              chain_id: chain
-            }, chain);
-            
-            toolCallsMade.push({
-              tool: 'get_address_info',
-              args: { address: this.extractAddressFromMessage(userMessage), chain_id: chain },
-              result: result
-            });
+            if (wantsTokens) {
+              // Get token holdings
+              const result = await this.executeTool('get_tokens_by_address', {
+                address: address,
+                chain_id: chain
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_tokens_by_address',
+                args: { address: address, chain_id: chain },
+                result: result
+              });
+            } else if (wantsContractAnalysis) {
+              // Get comprehensive contract data - both address info and transactions
+              const addressResult = await this.executeTool('get_address_info', {
+                address: address,
+                chain_id: chain
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_address_info',
+                args: { address: address, chain_id: chain },
+                result: addressResult
+              });
+              
+              // Also get recent transactions for contract analysis
+              const txResult = await this.executeTool('get_transactions_by_address', {
+                address: address,
+                chain_id: chain,
+                page_size: 10
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_transactions_by_address',
+                args: { address: address, chain_id: chain, page_size: 10 },
+                result: txResult
+              });
+              
+            } else if (wantsTransactions || wantsGasAnalysis) {
+              // Get transactions
+              const result = await this.executeTool('get_transactions_by_address', {
+                address: address,
+                chain_id: chain,
+                page_size: 10
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_transactions_by_address',
+                args: { address: address, chain_id: chain, page_size: 10 },
+                result: result
+              });
+            } else {
+              // Default: get address info
+              const result = await this.executeTool('get_address_info', {
+                address: address,
+                chain_id: chain
+              }, chain);
+              
+              toolCallsMade.push({
+                tool: 'get_address_info',
+                args: { address: address, chain_id: chain },
+                result: result
+              });
+            }
             
             this.logger.info(`✅ Checked chain ${chain}`);
           } catch (error) {
@@ -139,7 +209,7 @@ export class IntelligentBlockchainAgent {
         }
         
         // Generate summary from collected data
-        finalResponse = this.buildMultiChainActivitySummary(toolCallsMade);
+        finalResponse = this.buildSummaryFromToolCalls(toolCallsMade, userMessage);
         
         return {
           success: true,
@@ -198,7 +268,7 @@ export class IntelligentBlockchainAgent {
           this.logger.error('LLM invocation error:', llmError);
           // Synthesize deterministic summary if we already have tool data
           if (toolCallsMade.length > 0) {
-            const synthesized = this.buildMultiChainActivitySummary(toolCallsMade);
+            const synthesized = this.buildSummaryFromToolCalls(toolCallsMade, userMessage);
             content = `FINAL_ANSWER: ${synthesized}`;
           } else {
             // Force a minimal final answer if LLM fails and we have no data
@@ -262,15 +332,8 @@ If this is sufficient to answer the user's question, provide FINAL_ANSWER now.`;
         // No tool call - this is the final response
         finalResponse = this.extractFinalResponse(content);
         
-        // Check if this is a contract analysis request and we have comprehensive data
-        const isContractAnalysis = this.isContractAnalysisRequest(userMessage);
-        const hasAddressInfo = toolCallsMade.some(call => call.tool === 'get_address_info');
-        const hasMultipleTools = toolCallsMade.length >= 2;
-        
-        if (isContractAnalysis && hasAddressInfo && hasMultipleTools) {
-          // Use comprehensive contract analysis
-          finalResponse = this.buildComprehensiveContractAnalysis(toolCallsMade);
-        } else if (!finalResponse || finalResponse.trim().length < 10) {
+        // Use the response generator for intelligent analysis
+        if (!finalResponse || finalResponse.trim().length < 10) {
           // Fallback to basic summary
           finalResponse = `Analysis complete. I made ${toolCallsMade.length} tool call(s):\n\n` +
             toolCallsMade.map((call, i) => 
@@ -287,16 +350,8 @@ If this is sufficient to answer the user's question, provide FINAL_ANSWER now.`;
       }
 
       if (iteration >= this.maxIterations) {
-        // Check if we can provide comprehensive contract analysis
-        const isContractAnalysis = this.isContractAnalysisRequest(userMessage);
-        const hasAddressInfo = toolCallsMade.some(call => call.tool === 'get_address_info');
-        
-        if (isContractAnalysis && hasAddressInfo) {
-          finalResponse = this.buildComprehensiveContractAnalysis(toolCallsMade);
-        } else {
-          finalResponse = "I've reached the maximum number of analysis steps. Here's what I found:\n\n" + 
-                         JSON.stringify(toolCallsMade, null, 2);
-        }
+        // Use response generator for final analysis
+        finalResponse = this.buildSummaryFromToolCalls(toolCallsMade, userMessage);
       }
 
       return {
@@ -635,9 +690,77 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     const lowerMessage = message.toLowerCase();
     const multiChainKeywords = [
       'across all chains', 'all chains', 'multiple chains', 'every chain',
-      'each chain', 'all networks', 'multi-chain', 'multichain'
+      'each chain', 'all networks', 'multi-chain', 'multichain',
+      'by chain', 'breakdown by chain', 'per chain',
+      'compare', 'vs', 'versus', 'which chain', 'most active'
     ];
-    return multiChainKeywords.some(keyword => lowerMessage.includes(keyword));
+    
+    // Check for explicit multi-chain keywords
+    if (multiChainKeywords.some(keyword => lowerMessage.includes(keyword))) {
+      return true;
+    }
+    
+    // Check if multiple specific chains are mentioned
+    // Note: Check longer names first to avoid false positives (e.g., "base sepolia" before "sepolia")
+    const chainMentions = [];
+    
+    if (lowerMessage.includes('base sepolia')) {
+      chainMentions.push('base sepolia');
+    } else if (lowerMessage.includes('base')) {
+      chainMentions.push('base');
+    }
+    
+    // Only check for standalone "sepolia" if "base sepolia" wasn't found
+    if (!chainMentions.includes('base sepolia') && lowerMessage.includes('sepolia')) {
+      chainMentions.push('sepolia');
+    }
+    
+    if (lowerMessage.includes('ethereum') || lowerMessage.includes('eth mainnet') || (lowerMessage.includes('mainnet') && !lowerMessage.includes('sepolia'))) {
+      chainMentions.push('ethereum');
+    }
+    
+    if (lowerMessage.includes('optimism') || lowerMessage.includes(' op ')) {
+      chainMentions.push('optimism');
+    }
+    
+    if (lowerMessage.includes('arbitrum') || lowerMessage.includes('arb')) {
+      chainMentions.push('arbitrum');
+    }
+    
+    // If 2 or more DISTINCT chains are mentioned, it's a multi-chain request
+    return chainMentions.length >= 2;
+  }
+
+  // Check if the user is asking about tokens
+  private isTokenQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const tokenKeywords = [
+      'token', 'tokens', 'holdings', 'hold', 'owns', 'erc20', 'erc-20',
+      'what tokens', 'which tokens', 'token holdings', 'token balance',
+      'portfolio', 'distribution', 'suspicious', 'safety', 'creators'
+    ];
+    return tokenKeywords.some(keyword => lowerMessage.includes(keyword));
+  }
+
+  // Check if the user is asking about transactions
+  private isTransactionQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const txKeywords = [
+      'transaction', 'transactions', 'tx', 'txs', 'transfer', 'transfers',
+      'activity', 'activities', 'history', 'recent', 'last',
+      'interactions', 'interact', 'defi', 'protocols', 'patterns',
+      'comprehensive report', 'risk profile', 'assess'
+    ];
+    return txKeywords.some(keyword => lowerMessage.includes(keyword));
+  }
+
+  // Check if the user is asking about gas
+  private isGasQuery(message: string): boolean {
+    const lowerMessage = message.toLowerCase();
+    const gasKeywords = [
+      'gas', 'fee', 'fees', 'cost', 'spend', 'spent', 'efficiency', 'breakdown'
+    ];
+    return gasKeywords.some(keyword => lowerMessage.includes(keyword));
   }
 
   // Check if the user message is requesting contract analysis
@@ -658,212 +781,65 @@ START WITH THE TOOL CALL IMMEDIATELY. DO NOT explain what you're going to do fir
     return addressMatch ? addressMatch[0] : '';
   }
 
-  // Build a human-readable multi-chain activity summary from tool results
-  private buildMultiChainActivitySummary(toolCallsMade: any[]): string {
-    const chainNames: Record<string, string> = {
-      '1': 'Ethereum Mainnet',
-      '11155111': 'Sepolia Testnet',
-      '84532': 'Base Sepolia',
-      '10': 'Optimism',
-      '42161': 'Arbitrum One'
-    };
-
-    const lines: string[] = [];
-    for (const call of toolCallsMade) {
-      if (call.tool !== 'get_address_info') continue;
-      const chainId = String(call.args?.chain_id ?? 'unknown');
-      const name = chainNames[chainId] || `Chain ${chainId}`;
-      const basic = call.result?.data?.basic_info || {};
-      const balanceWei = basic.coin_balance ?? '0';
-      // Convert wei to ETH (string-safe)
-      const balanceEth = (() => {
-        try {
-          const len = balanceWei.length;
-          if (len === 0) return '0';
-          const whole = len > 18 ? balanceWei.slice(0, len - 18) : '0';
-          const frac = balanceWei.padStart(19, '0').slice(-18).replace(/0+$/, '') || '0';
-          return frac === '0' ? whole : `${whole}.${frac}`;
-        } catch {
-          return '0';
-        }
-      })();
-
-      const hasTokens = Boolean(basic.has_tokens);
-      const hasTransfers = Boolean(basic.has_token_transfers);
-      lines.push(`- ${name}: balance ${balanceEth} ETH, tokens=${hasTokens ? 'yes' : 'no'}, token_transfers=${hasTransfers ? 'yes' : 'no'}`);
+  // Extract which specific chains are mentioned in the message
+  private extractRequestedChains(message: string): string[] {
+    const lowerMessage = message.toLowerCase();
+    const chains: string[] = [];
+    
+    // Check for specific chains (longer names first to avoid false positives)
+    if (lowerMessage.includes('base sepolia')) {
+      chains.push('84532');
+    } else if (lowerMessage.includes('base')) {
+      chains.push('84532');
     }
-
-    if (lines.length === 0) {
-      return 'No activity detected. Try asking for a specific chain or recent transactions.';
+    
+    // Only check for standalone "sepolia" if "base sepolia" wasn't found
+    if (!chains.includes('84532') && lowerMessage.includes('sepolia')) {
+      chains.push('11155111');
     }
-
-    return `Multi-chain activity summary for the address:\n${lines.join('\n')}`;
+    
+    if (lowerMessage.includes('ethereum') || lowerMessage.includes('eth mainnet') || (lowerMessage.includes('mainnet') && !lowerMessage.includes('sepolia'))) {
+      if (!chains.includes('1')) chains.push('1');
+    }
+    
+    if (lowerMessage.includes('optimism') || lowerMessage.includes(' op ')) {
+      if (!chains.includes('10')) chains.push('10');
+    }
+    
+    if (lowerMessage.includes('arbitrum') || lowerMessage.includes('arb')) {
+      if (!chains.includes('42161')) chains.push('42161');
+    }
+    
+    return chains;
   }
+
+  // Removed - now handled by response generator
+
+  // Removed gas analysis - now handled by response generator
+
+  // Removed bulky transaction pattern analysis - now handled by response generator
+
+  private weiToEth(weiString: string): string {
+    try {
+      const len = weiString.length;
+      if (len === 0 || weiString === '0') return '0';
+      const whole = len > 18 ? weiString.slice(0, len - 18) : '0';
+      const frac = weiString.padStart(19, '0').slice(-18).slice(0, 6).replace(/0+$/, '') || '0';
+      return frac === '0' ? whole : `${whole}.${frac}`;
+    } catch {
+      return '0';
+    }
+  }
+
+  private buildSummaryFromToolCalls(toolCallsMade: any[], userMessage: string): string {
+    // Use the new response generator for intelligent, context-aware responses
+    return this.responseGenerator.generateResponse(userMessage, toolCallsMade);
+  }
+
+  // Removed - now handled by response generator
 
   // Build a comprehensive contract analysis from multiple tool results
-  private buildComprehensiveContractAnalysis(toolCallsMade: any[]): string {
-    const addressInfo = toolCallsMade.find(call => call.tool === 'get_address_info');
-    const transactionInfo = toolCallsMade.find(call => call.tool === 'get_transactions_by_address');
-    const tokenInfo = toolCallsMade.find(call => call.tool === 'get_tokens_by_address');
-
-    if (!addressInfo) {
-      return 'Insufficient data for contract analysis. Please try again.';
-    }
-
-    const basic = addressInfo.result?.data?.basic_info || {};
-    const chainId = String(addressInfo.args?.chain_id ?? 'unknown');
-    const chainNames: Record<string, string> = {
-      '1': 'Ethereum Mainnet',
-      '11155111': 'Sepolia Testnet',
-      '84532': 'Base Sepolia',
-      '10': 'Optimism',
-      '42161': 'Arbitrum One'
-    };
-    const chainName = chainNames[chainId] || `Chain ${chainId}`;
-
-    // Convert wei to ETH
-    const balanceWei = basic.coin_balance ?? '0';
-    const balanceEth = (() => {
-      try {
-        const len = balanceWei.length;
-        if (len === 0) return '0';
-        const whole = len > 18 ? balanceWei.slice(0, len - 18) : '0';
-        const frac = balanceWei.padStart(19, '0').slice(-18).replace(/0+$/, '') || '0';
-        return frac === '0' ? whole : `${whole}.${frac}`;
-      } catch {
-        return '0';
-      }
-    })();
-
-    // Determine risk level
-    let riskLevel = 'UNKNOWN';
-    let riskIndicators: string[] = [];
-    
-    if (basic.is_verified === true) {
-      riskIndicators.push('✅ Contract is verified - source code available');
-    } else {
-      riskIndicators.push('⚠️ Contract is not verified - no source code');
-    }
-
-    if (basic.is_scam === false) {
-      riskIndicators.push('✅ No scam flags detected');
-    } else if (basic.is_scam === true) {
-      riskIndicators.push('🚨 SCAM FLAG DETECTED - DO NOT INTERACT');
-    }
-
-    if (basic.reputation === 'ok') {
-      riskIndicators.push('✅ Good reputation');
-    } else if (basic.reputation === 'warning') {
-      riskIndicators.push('⚠️ Reputation warning');
-    }
-
-    if (basic.creation_status === 'success') {
-      riskIndicators.push('✅ Contract created successfully');
-    }
-
-    if (basic.has_logs === true) {
-      riskIndicators.push('✅ Contract emits events (has logs)');
-    }
-
-    // Calculate risk level
-    const hasScamFlag = basic.is_scam === true;
-    const isVerified = basic.is_verified === true;
-    const hasGoodReputation = basic.reputation === 'ok';
-    const hasActivity = basic.has_token_transfers === true || basic.has_tokens === true;
-
-    if (hasScamFlag) {
-      riskLevel = 'HIGH - SCAM DETECTED';
-    } else if (!isVerified && !hasGoodReputation) {
-      riskLevel = 'MEDIUM - Unverified contract with poor reputation';
-    } else if (!isVerified) {
-      riskLevel = 'MEDIUM - Unverified contract';
-    } else if (hasGoodReputation && hasActivity) {
-      riskLevel = 'LOW - Safe to interact';
-    } else {
-      riskLevel = 'LOW - Appears safe';
-    }
-
-    // Build response
-    const lines: string[] = [];
-    lines.push(`**Contract Analysis: ${basic.name || 'Unknown'} (${basic.hash?.slice(0, 6)}...${basic.hash?.slice(-4)}) on ${chainName}**`);
-    lines.push('');
-    
-    if (riskLevel.includes('HIGH')) {
-      lines.push('🚨 **DO NOT INTERACT**');
-    } else if (riskLevel.includes('MEDIUM')) {
-      lines.push('⚠️ **PROCEED WITH CAUTION**');
-    } else {
-      lines.push('✅ **SAFE TO INTERACT**');
-    }
-    
-    lines.push('');
-    lines.push('**Contract Details:**');
-    lines.push(`- Name: ${basic.name || 'Unknown'}`);
-    lines.push(`- Type: ${basic.is_contract ? 'Smart Contract' : 'EOA'}`);
-    lines.push(`- Verified: ${basic.is_verified ? '✅ Yes (Source code available)' : '❌ No'}`);
-    lines.push(`- Scam Flag: ${basic.is_scam ? '🚨 YES' : '✅ No'}`);
-    lines.push(`- Reputation: ${basic.reputation || 'Unknown'}`);
-    if (basic.creator_address_hash) {
-      lines.push(`- Creator: ${basic.creator_address_hash.slice(0, 6)}...${basic.creator_address_hash.slice(-4)}`);
-    }
-    if (basic.creation_transaction_hash) {
-      lines.push(`- Creation TX: ${basic.creation_transaction_hash}`);
-    }
-    
-    lines.push('');
-    lines.push('**Activity Analysis:**');
-    lines.push(`- ETH Balance: ${balanceEth} ETH`);
-    lines.push(`- Has Logs: ${basic.has_logs ? '✅ Yes (Contract emits events)' : '❌ No'}`);
-    lines.push(`- Has Token Transfers: ${basic.has_token_transfers ? '✅ Yes' : '❌ No'}`);
-    lines.push(`- Has Tokens: ${basic.has_tokens ? '✅ Yes' : '❌ No'}`);
-    
-    if (transactionInfo?.result?.data) {
-      const txCount = Array.isArray(transactionInfo.result.data) ? transactionInfo.result.data.length : 0;
-      lines.push(`- Recent Transactions: ${txCount} (last 20)`);
-    }
-    
-    lines.push('');
-    lines.push('**Token Holdings:**');
-    if (tokenInfo?.result?.data && Array.isArray(tokenInfo.result.data) && tokenInfo.result.data.length > 0) {
-      tokenInfo.result.data.forEach((token: any, index: number) => {
-        const balance = token.balance ? (parseInt(token.balance) / Math.pow(10, parseInt(token.decimals || '18'))).toFixed(6) : '0';
-        lines.push(`${index + 1}. ${token.name} (${token.symbol}): ${balance}`);
-      });
-    } else {
-      lines.push('No tokens found or token data not available');
-    }
-    
-    lines.push('');
-    lines.push('**Risk Assessment:**');
-    riskIndicators.forEach(indicator => lines.push(`- ${indicator}`));
-    
-    lines.push('');
-    lines.push(`**Risk Level: ${riskLevel}**`);
-    
-    if (riskLevel.includes('HIGH')) {
-      lines.push('🚨 **DO NOT INTERACT WITH THIS CONTRACT**');
-    } else if (riskLevel.includes('MEDIUM')) {
-      lines.push('⚠️ **Exercise extreme caution before interacting**');
-    } else {
-      lines.push('✅ **This contract appears safe for interaction**');
-    }
-    
-    lines.push('');
-    lines.push('**Recommendations:**');
-    if (basic.is_verified) {
-      lines.push('- ✅ Review the verified source code before interacting');
-    } else {
-      lines.push('- ⚠️ Contract is unverified - review with extreme caution');
-    }
-    lines.push('- Check transaction patterns for any unusual activity');
-    lines.push('- Verify token holdings and transfer patterns');
-    if (basic.creator_address_hash) {
-      lines.push('- Investigate the creator address for past behavior');
-    }
-    lines.push('- Consider starting with small test transactions');
-
-    return lines.join('\n');
-  }
+  // Removed - now handled by response generator
 
   clearHistory(): void {
     this.conversationHistory = [];
